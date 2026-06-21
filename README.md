@@ -44,6 +44,16 @@ curl -X POST http://localhost:8000/webhook/wazuh \
 ```
 Produces a structured analysis and (when `THEHIVE_API_KEY` is set) a TheHive case.
 
+## Memory operator API (`/memory`)
+Privileged endpoints for inspecting/editing/deleting the semantic memory that drives
+analysis. **All require** `Authorization: Bearer $OPERATOR_API_TOKEN` (in `.env`).
+- `GET /memory` — filter by `agent_name`/`source_ip`/`rule_id`/`date_from`/`date_to` (+ `limit`/`offset`)
+- `POST /memory/search` — `{query, agent_name?, k?}` → nearest memories (same locked embed pipeline)
+- `GET /memory/{id}` — inspect full `alert_text` + `analysis`
+- `PATCH /memory/{id}` — `{analysis}` edits analysis only (no re-embed); `{alert_text}` changes
+  the identity and **re-embeds** with the same pipeline
+- `DELETE /memory/{id}` — remove a noisy/bad entry
+
 ## Ports
 - TheHive UI/API `9000` (context path `/thehive`) · agent webhook `8000`
 - Wazuh dashboard `8443` · Wazuh indexer `9200` · manager `1514/1515/55000`

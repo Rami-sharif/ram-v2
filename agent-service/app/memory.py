@@ -186,3 +186,95 @@ def write_back(alert: WazuhAlert, identity: str, analysis: AnalysisResult,
     logger.info("Wrote memory row id=%s (agent=%s, src=%s)",
                 new_id, alert.agent.name, source_ip_of(alert))
     return new_id
+
+
+# --------------------------------------------------------------------------- #
+# Operator CRUD (used by the authenticated /memory endpoints, not the webhook)
+# --------------------------------------------------------------------------- #
+def list_memories(
+    agent_name: Optional[str] = None,
+    source_ip: Optional[str] = None,
+    rule_id: Optional[str] = None,
+    date_from: Optional[datetime] = None,
+    date_to: Optional[datetime] = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    clauses, params = [], []
+    if agent_name:
+        clauses.append("agent_name = %s"); params.append(agent_name)
+    if source_ip:
+        clauses.append("source_ip = %s"); params.append(source_ip)
+    if rule_id:
+        clauses.append("rule_id = %s"); params.append(rule_id)
+    if date_from:
+        clauses.append("COALESCE(alert_timestamp, created_at) >= %s"); params.append(date_from)
+    if date_to:
+        clauses.append("COALESCE(alert_timestamp, created_at) <= %s"); params.append(date_to)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    params.extend([limit, offset])
+    with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            f"SELECT {_SELECT_COLS} FROM soc_memory_vectors {where} "
+            "ORDER BY COALESCE(alert_timestamp, created_at) DESC LIMIT %s OFFSET %s",
+            params,
+        )
+        return cur.fetchall()
+
+
+def get_memory(memory_id: int) -> Optional[dict[str, Any]]:
+    with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            f"SELECT {_SELECT_COLS} FROM soc_memory_vectors WHERE id = %s", (memory_id,)
+        )
+        return cur.fetchone()
+
+
+def search_memories(query: str, agent_name: Optional[str] = None,
+                    k: int = 5) -> list[dict[str, Any]]:
+    """Semantic search: embed the query with the locked pipeline, return nearest."""
+    qv = vector_literal(embed(query))
+    clause = "WHERE agent_name = %s" if agent_name else ""
+    params: list[Any] = [qv]
+    if agent_name:
+        params.append(agent_name)
+    params.extend([qv, k])
+    with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            f"SELECT {_SELECT_COLS}, 1 - (embedding <=> %s::vector) AS similarity "
+            f"FROM soc_memory_vectors {clause} "
+            "ORDER BY embedding <=> %s::vector LIMIT %s",
+            params,
+        )
+        return cur.fetchall()
+
+
+def update_analysis(memory_id: int, analysis: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """Update ONLY the analysis field. The embedding is NOT touched (the vector is
+    built from the alert identity, not the analysis)."""
+    with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            f"UPDATE soc_memory_vectors SET analysis = %s WHERE id = %s "
+            f"RETURNING {_SELECT_COLS}",
+            (Json(analysis), memory_id),
+        )
+        return cur.fetchone()
+
+
+def reembed_identity(memory_id: int, new_alert_text: str) -> Optional[dict[str, Any]]:
+    """Update the identity text AND re-embed it with the exact same pipeline.
+    Required whenever an edit touches the identity fields."""
+    new_vec = vector_literal(embed(new_alert_text))
+    with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            f"UPDATE soc_memory_vectors SET alert_text = %s, embedding = %s::vector "
+            f"WHERE id = %s RETURNING {_SELECT_COLS}",
+            (new_alert_text, new_vec, memory_id),
+        )
+        return cur.fetchone()
+
+
+def delete_memory(memory_id: int) -> bool:
+    with get_pool().connection() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM soc_memory_vectors WHERE id = %s", (memory_id,))
+        return cur.rowcount > 0

@@ -67,6 +67,20 @@ class AnalysisResult(BaseModel):
     recommended_action: str
 
 
+class MemorySearchRequest(BaseModel):
+    query: str
+    agent_name: Optional[str] = None
+    k: int = Field(default=5, ge=1, le=50)
+
+
+class MemoryUpdateRequest(BaseModel):
+    """Edit a memory. analysis-only edits do NOT re-embed; changing alert_text
+    (the identity) forces a re-embed. At least one field is required."""
+    model_config = ConfigDict(extra="forbid")
+    analysis: Optional[dict[str, Any]] = None
+    alert_text: Optional[str] = None
+
+
 class WebhookResponse(BaseModel):
     status: str
     alert_id: Optional[str] = None

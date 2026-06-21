@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     # --- Logging ---
     agent_log_level: str = "INFO"
 
+    # --- Operator API (memory endpoints) ---
+    operator_api_token: str = ""
+
     @property
     def thehive_enabled(self) -> bool:
         return bool(self.thehive_api_key.strip())

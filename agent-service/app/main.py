@@ -8,13 +8,15 @@ from fastapi.responses import JSONResponse
 from .agent import AgentError
 from .config import get_settings
 from .logging_conf import configure_logging
+from .memory_api import router as memory_router
 from .webhook import process_alert
 
 settings = get_settings()
 configure_logging(settings.agent_log_level)
 logger = logging.getLogger("ramv2.agent")
 
-app = FastAPI(title="RAM v2 — Agent Service", version="0.1.0")
+app = FastAPI(title="RAM v2 — Agent Service", version="0.2.0")
+app.include_router(memory_router)
 
 
 @app.get("/health")
