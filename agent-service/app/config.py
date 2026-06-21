@@ -29,7 +29,20 @@ class Settings(BaseSettings):
     thehive_timeout: float = 20.0
 
     # --- Agent loop ---
-    agent_max_iterations: int = 3
+    agent_max_iterations: int = 8  # bounded tool choice has more tools now
+
+    # --- Wazuh Indexer (read-only investigation queries) ---
+    wazuh_indexer_url: str = "https://wazuh.indexer:9200"
+    wazuh_indexer_ro_user: str = "ram_agent_ro"
+    wazuh_indexer_ro_password: str = ""
+    wazuh_indexer_ca_cert: str = "/certs/root-ca.pem"  # empty => skip TLS verify
+    wazuh_indexer_timeout: float = 15.0
+
+    # --- Investigation tool guardrails (cost/size caps) ---
+    tool_max_result_chars: int = 8000   # cap any single tool result injected into prompt
+    tool_max_hits: int = 10             # cap rows returned by indexer queries
+    tool_related_window_minutes: int = 30
+    tool_full_log_max_chars: int = 500  # truncate each full_log line
 
     # --- PostgreSQL (semantic memory) ---
     postgres_host: str = "postgres"

@@ -102,3 +102,4 @@ class WebhookResponse(BaseModel):
     case: Optional[dict[str, Any]] = None  # populated when TheHive case creation runs
     memory: Optional[dict[str, Any]] = None  # retrieval/write-back summary
     triage: Optional[TriageDecision] = None  # deterministic routing decision
+    tool_trace: list[dict[str, Any]] = Field(default_factory=list)  # ordered tool calls

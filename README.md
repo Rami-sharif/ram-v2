@@ -44,6 +44,22 @@ curl -X POST http://localhost:8000/webhook/wazuh \
 ```
 Produces a structured analysis and (when `THEHIVE_API_KEY` is set) a TheHive case.
 
+## Investigation agent (read-only, bounded tool choice)
+The agent investigates each alert by freely choosing tools from a **read-only allowlist**
+(it cannot act), capped at `AGENT_MAX_ITERATIONS` (default 8); the loop ends on
+`submit_analysis` or a forced submit at the cap (the alert is never dropped). Every tool
+call is logged with name, args, and the model's `reason`. Tools live in a registry
+(`app/tools/`) — adding one is a single `register(Tool(...))`.
+
+Tools (all read-only): `virustotal_ip_lookup`, `lookup_file_hash`, `lookup_domain`,
+`get_related_logs`, `get_host_alert_history`, `get_user_activity`, `get_full_log_context`
+(Wazuh **Indexer** queries via the least-privilege `ram_agent_ro` OpenSearch user),
+and `search_memory`. Results are size-capped; tool failures degrade gracefully.
+
+The least-privilege indexer user is created by `scripts/bootstrap-indexer-rouser.sh`
+(read-only on `wazuh-alerts-*`; write/security calls rejected). Output shape is unchanged,
+so the triage router below is unaffected.
+
 ## Triage router (deterministic, no LLM)
 After the agent produces its analysis, a fixed-code router decides the action by
 `severity_score` (0–100, env thresholds) and dedups by `agent_name|rule_id|source_ip`:

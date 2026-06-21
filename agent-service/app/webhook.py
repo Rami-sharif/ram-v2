@@ -61,7 +61,7 @@ def process_alert(payload: dict[str, Any]) -> WebhookResponse:
     embedding, memories, memory_context = _retrieve_memory(alert)
 
     analysis: AnalysisResult
-    analysis, enrichment = run_agent(alert, memory_context)
+    analysis, enrichment, tool_trace = run_agent(alert, memory_context)
 
     # Write the new alert+analysis back, reusing the embedding (don't embed twice).
     memory_id: int | None = None
@@ -88,6 +88,7 @@ def process_alert(payload: dict[str, Any]) -> WebhookResponse:
         analysis=analysis,
         case=case,
         triage=decision,
+        tool_trace=tool_trace,
         memory={
             "written_id": memory_id,
             "retrieved": len(memories),

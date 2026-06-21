@@ -246,6 +246,9 @@ services:
     hostname: agent-service
     restart: unless-stopped
     env_file: .env
+    volumes:
+      # Read-only Wazuh indexer CA so the agent can verify TLS to wazuh.indexer.
+      - ./wazuh/config/wazuh_indexer_ssl_certs/root-ca.pem:/certs/root-ca.pem:ro
     ports:
       - "8000:8000"
     networks:

@@ -29,7 +29,8 @@ def _build_description(alert: WazuhAlert, analysis: AnalysisResult, enrichment: 
         or "- none"
     )
     enrich_lines = (
-        "\n".join(f"- `{ip}`: {info}" for ip, info in enrichment.items()) or "- none"
+        "\n".join(f"- `{key}`: {str(val)[:400]}" for key, val in enrichment.items())
+        or "- none"
     )
     return (
         f"## Automated triage (RAM v2)\n\n"
@@ -38,7 +39,7 @@ def _build_description(alert: WazuhAlert, analysis: AnalysisResult, enrichment: 
         f"**Severity:** {analysis.severity_label} ({analysis.severity_score}/100)\n\n"
         f"**Recommended action:** {analysis.recommended_action}\n\n"
         f"### MITRE ATT&CK\n{mitre_lines}\n\n"
-        f"### VirusTotal enrichment\n{enrich_lines}\n\n"
+        f"### Investigation evidence (read-only tools)\n{enrich_lines}\n\n"
         f"### Source alert\n"
         f"- Rule level: {alert.rule_level}\n"
         f"- Rule: {alert.description}\n"
