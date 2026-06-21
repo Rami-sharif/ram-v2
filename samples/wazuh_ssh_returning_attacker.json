@@ -1,0 +1,19 @@
+{
+  "timestamp": "2026-06-21T11:05:00.000+0000",
+  "id": "1750505300.222222",
+  "location": "/var/log/auth.log",
+  "rule": {
+    "level": 10,
+    "description": "sshd: authentication success.",
+    "id": "5715",
+    "groups": ["syslog", "sshd", "authentication_success"],
+    "mitre": { "id": ["T1078"], "tactic": ["Persistence"], "technique": ["Valid Accounts"] }
+  },
+  "agent": { "id": "001", "name": "web-server-01", "ip": "10.0.0.5" },
+  "data": {
+    "srcip": "185.220.101.1",
+    "srcport": "51234",
+    "dstuser": "root"
+  },
+  "full_log": "Jun 21 11:05:00 web-server-01 sshd[12399]: Accepted password for root from 185.220.101.1 port 51234 ssh2"
+}

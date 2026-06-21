@@ -31,6 +31,29 @@ class Settings(BaseSettings):
     # --- Agent loop ---
     agent_max_iterations: int = 3
 
+    # --- PostgreSQL (semantic memory) ---
+    postgres_host: str = "postgres"
+    postgres_port: int = 5432
+    postgres_user: str = "ramv2"
+    postgres_password: str = ""
+    postgres_db: str = "ramv2"
+
+    # --- Semantic memory ---
+    # LOCKED pipeline: changing model/dim/normalization requires re-embedding all rows.
+    memory_enabled: bool = True
+    embedding_model: str = "gemini-embedding-001"
+    embedding_dim: int = 768
+    embedding_task_type: str = "SEMANTIC_SIMILARITY"
+    memory_top_k: int = 5   # most-similar
+    memory_recent_n: int = 5  # most-recent
+
+    @property
+    def postgres_dsn(self) -> str:
+        return (
+            f"postgresql://{self.postgres_user}:{self.postgres_password}"
+            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+        )
+
     # --- Logging ---
     agent_log_level: str = "INFO"
 

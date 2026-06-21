@@ -124,19 +124,25 @@ def _first_function_call(response: Any):
     return None
 
 
-def _build_prompt(alert: WazuhAlert, public_ips: list[str]) -> str:
+def _build_prompt(alert: WazuhAlert, public_ips: list[str], memory_context: str) -> str:
     alert_json = alert.model_dump(exclude_none=True)
     return (
         "Analyze this Wazuh alert.\n\n"
         f"Rule level: {alert.rule_level}\n"
         f"Description: {alert.description}\n"
         f"Public IPs found in alert: {public_ips or 'none'}\n\n"
+        "Prior related alerts on THIS host (most relevant first). Use them to spot "
+        "repeat offenders, returning source IPs, and multi-step attack chains; an alert "
+        "that recurs or matches a known-bad pattern should raise severity/confidence:\n"
+        f"{memory_context}\n\n"
         "Full alert JSON:\n"
         f"{json.dumps(alert_json, indent=2, default=str)}"
     )
 
 
-def run_agent(alert: WazuhAlert) -> tuple[AnalysisResult, dict[str, Any]]:
+def run_agent(
+    alert: WazuhAlert, memory_context: str = "No prior related alerts recorded for this host."
+) -> tuple[AnalysisResult, dict[str, Any]]:
     """Run the bounded, fixed-order agent loop. Returns (analysis, enrichment)."""
     settings = get_settings()
     client = genai.Client(api_key=settings.gemini_api_key)
@@ -145,7 +151,10 @@ def run_agent(alert: WazuhAlert) -> tuple[AnalysisResult, dict[str, Any]]:
     enrichment: dict[str, Any] = {}
 
     contents: list[types.Content] = [
-        types.Content(role="user", parts=[types.Part(text=_build_prompt(alert, public_ips))])
+        types.Content(
+            role="user",
+            parts=[types.Part(text=_build_prompt(alert, public_ips, memory_context))],
+        )
     ]
 
     # Fixed plan. VT step is included only when there's a public IP to enrich.

@@ -74,3 +74,4 @@ class WebhookResponse(BaseModel):
     enrichment: dict[str, Any] = Field(default_factory=dict)
     analysis: AnalysisResult
     case: Optional[dict[str, Any]] = None  # populated when TheHive case creation runs
+    memory: Optional[dict[str, Any]] = None  # retrieval/write-back summary
