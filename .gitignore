@@ -40,3 +40,6 @@ thehive/config/secret.conf
 *.swp
 .idea/
 .vscode/
+
+# Wazuh dashboard rendered config (contains API password; template is committed)
+wazuh/config/wazuh_dashboard/wazuh.yml

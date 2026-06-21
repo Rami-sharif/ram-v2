@@ -20,12 +20,22 @@ agent-service/          FastAPI service (webhook, agent, tools, thehive client)
 
 ## Setup
 1. `cp .env.example .env` and fill in `GEMINI_API_KEY`, `VIRUSTOTAL_API_KEY`, `POSTGRES_PASSWORD`.
-2. `./scripts/render-thehive-config.sh` — render TheHive's secret config from templates.
-3. `docker compose -f wazuh/generate-indexer-certs.yml run --rm generator` — generate Wazuh TLS certs.
-4. `docker compose up -d` — bring up the stack.
-5. `./scripts/bootstrap-thehive.sh` — create the org + agent service account, mint its
+2. Set the Wazuh credential vars in `.env` (`WAZUH_INDEXER_PASSWORD`,
+   `WAZUH_DASHBOARD_PASSWORD`, `WAZUH_API_PASSWORD`) — strong values, not the demo defaults.
+3. `./scripts/render-thehive-config.sh` — render TheHive's secret config from templates.
+4. `./scripts/render-wazuh-config.sh` — render the dashboard's API config from template.
+5. `docker compose -f wazuh/generate-indexer-certs.yml run --rm generator` — generate Wazuh TLS certs.
+6. `docker compose up -d` — bring up the stack.
+7. `./scripts/bootstrap-thehive.sh` — create the org + agent service account, mint its
    API key into `.env`, and rotate the default admin password. Then
    `docker compose up -d agent-service` to load the key.
+
+> **Wazuh demo passwords**: the indexer (`admin`, `kibanaserver`) and API (`wazuh-wui`)
+> users ship with public demo passwords. After first boot, rotate them: update the bcrypt
+> hashes in `wazuh/config/wazuh_indexer/internal_users.yml` (use the indexer's `hash.sh`),
+> apply with `securityadmin.sh -t internalusers`, change `wazuh-wui` via the Wazuh API, and
+> set the matching `WAZUH_*` values in `.env`. The unused demo users (kibanaro, logstash,
+> readall, snapshotrestore) still hold defaults — remove or rotate them in a later pass.
 
 ## Test the pipeline
 ```
