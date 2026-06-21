@@ -19,8 +19,21 @@ venv/
 # ---- Docker / data volumes ----
 data/
 volumes/
-wazuh-config/
 *.log
+
+# bind-mounted runtime data (keep the dirs via .gitkeep, ignore contents)
+elasticsearch/data/
+elasticsearch/logs/
+thehive/data/files/
+thehive/data/database/
+thehive/logs/
+
+# Wazuh generated TLS material
+wazuh/config/wazuh_indexer_ssl_certs/
+
+# TheHive rendered config (contains secrets; templates are committed)
+thehive/config/index.conf
+thehive/config/secret.conf
 
 # ---- OS / editor ----
 .DS_Store

@@ -1,0 +1,13 @@
+# Rendered to index.conf by scripts/render-thehive-config.sh (gitignored output).
+db.janusgraph.index.search {
+  backend = elasticsearch
+  hostname = ["elasticsearch"]
+  index-name = thehive
+  elasticsearch.http.auth {
+    type = "basic"
+    basic {
+      username = "elastic"
+      password = "###ELASTICSEARCH_PASSWORD###"
+    }
+  }
+}
