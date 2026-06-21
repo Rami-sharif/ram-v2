@@ -60,6 +60,12 @@ class Settings(BaseSettings):
     # --- Operator API (memory endpoints) ---
     operator_api_token: str = ""
 
+    # --- Triage router (severity_score is on the locked 0-100 scale) ---
+    triage_medium_threshold: int = 40   # score < this => low (auto-close)
+    triage_high_threshold: int = 80     # score >= this => high (flag/escalate)
+    triage_dedup_window_hours: float = 6.0
+    triage_low_create_resolved_case: bool = False  # low: default no case (memory+log only)
+
     @property
     def thehive_enabled(self) -> bool:
         return bool(self.thehive_api_key.strip())

@@ -3,11 +3,10 @@ when enabled, a TheHive case)."""
 import logging
 from typing import Any
 
-from . import memory
+from . import memory, triage
 from .agent import AgentError, run_agent
 from .config import get_settings
 from .schemas import AnalysisResult, WazuhAlert, WebhookResponse
-from .thehive import TheHiveError, create_case
 
 logger = logging.getLogger(__name__)
 
@@ -72,17 +71,14 @@ def process_alert(payload: dict[str, Any]) -> WebhookResponse:
         except Exception:  # noqa: BLE001
             logger.exception("Memory write-back failed (analysis preserved)")
 
+    # Deterministic triage: decide the action (route + dedup) AFTER memory write-back,
+    # which has already run above and is independent of this decision.
+    decision = None
     case: dict[str, Any] | None = None
-    settings = get_settings()
-    if settings.thehive_enabled:
-        # A TheHive failure must not discard the analysis we already produced.
-        try:
-            case = create_case(alert, analysis, enrichment)
-        except TheHiveError as exc:
-            logger.error("Case creation failed (analysis preserved): %s", exc)
-            case = {"error": str(exc)}
-    else:
-        logger.info("TheHive disabled (no API key) — skipping case creation")
+    try:
+        decision, case = triage.route_and_execute(alert, analysis, enrichment)
+    except Exception:  # noqa: BLE001 - routing failure must not lose the analysis/memory
+        logger.exception("Triage routing failed (analysis + memory preserved)")
 
     return WebhookResponse(
         status="ok",
@@ -91,6 +87,7 @@ def process_alert(payload: dict[str, Any]) -> WebhookResponse:
         enrichment=enrichment,
         analysis=analysis,
         case=case,
+        triage=decision,
         memory={
             "written_id": memory_id,
             "retrieved": len(memories),

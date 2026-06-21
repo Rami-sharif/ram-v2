@@ -44,6 +44,20 @@ curl -X POST http://localhost:8000/webhook/wazuh \
 ```
 Produces a structured analysis and (when `THEHIVE_API_KEY` is set) a TheHive case.
 
+## Triage router (deterministic, no LLM)
+After the agent produces its analysis, a fixed-code router decides the action by
+`severity_score` (0–100, env thresholds) and dedups by `agent_name|rule_id|source_ip`:
+- **score < `TRIAGE_MEDIUM_THRESHOLD`** → auto-close (no case; memory + audit log only)
+- **medium ≤ score < `TRIAGE_HIGH_THRESHOLD`** → open `needs-review` case
+- **score ≥ `TRIAGE_HIGH_THRESHOLD`** → case + `flag` (escalated)
+- **dedup**: within `TRIAGE_DEDUP_WINDOW_HOURS` a repeat key suppresses the new case and
+  increments `occurrence_count` on the existing one. Alerts with **no source_ip are never
+  deduped** (always create a case) to avoid falsely merging unrelated no-IP events.
+
+Memory write-back is independent of routing — auto-closed and deduped alerts are still
+stored. Every decision is logged with its reason (`TRIAGE decision …`). Dedup state lives
+in `triage_dedup` (`db/002_triage_dedup.sql`).
+
 ## Memory operator API (`/memory`)
 Privileged endpoints for inspecting/editing/deleting the semantic memory that drives
 analysis. **All require** `Authorization: Bearer $OPERATOR_API_TOKEN` (in `.env`).

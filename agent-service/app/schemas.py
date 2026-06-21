@@ -81,6 +81,18 @@ class MemoryUpdateRequest(BaseModel):
     alert_text: Optional[str] = None
 
 
+class TriageDecision(BaseModel):
+    branch: Literal["low", "medium", "high"]
+    action: Literal["auto_close", "create_open", "create_flagged", "suppress_duplicate"]
+    reason: str
+    severity_score: int
+    dedup_key: Optional[str] = None
+    dedup_eligible: bool = False
+    suppressed: bool = False
+    occurrence_count: Optional[int] = None
+    existing_case_number: Optional[int] = None
+
+
 class WebhookResponse(BaseModel):
     status: str
     alert_id: Optional[str] = None
@@ -89,3 +101,4 @@ class WebhookResponse(BaseModel):
     analysis: AnalysisResult
     case: Optional[dict[str, Any]] = None  # populated when TheHive case creation runs
     memory: Optional[dict[str, Any]] = None  # retrieval/write-back summary
+    triage: Optional[TriageDecision] = None  # deterministic routing decision
