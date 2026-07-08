@@ -1,12 +1,17 @@
-# RAM v2 — Phase 1
+# RAM v2
 
-SOC alert-triage pipeline: **Wazuh alert → AI agent analysis (Gemini + VirusTotal) → TheHive case.**
+SOC alert-triage pipeline: **Wazuh alert → AI agent analysis (Gemini + VirusTotal) →
+deterministic triage → TheHive case**, with a semantic memory layer and a server-rendered
+analyst console. Single company, single environment — no multi-tenancy.
 
-Phase 1 scope is an end-to-end pipeline only. No memory layer, no triage router, no
-multi-tenancy. Single company, single environment.
+Built in phases: (1) end-to-end pipeline, (1.5) TheHive/Wazuh hardening, (2) semantic
+memory + operator API, (3) deterministic triage router, (4) read-only investigation agent,
+(5) analyst console. **Phases 1–5 complete** (see Status at the bottom).
 
 ## Components
-- **PostgreSQL + pgvector** — provisioned now, unused until a later phase.
+- **PostgreSQL + pgvector** — central datastore: semantic memory (RAG vectors),
+  triage dedup state, and the analyst console (investigations, verdict reviews,
+  triage feedback, users, audit log).
 - **TheHive 5** (+ Elasticsearch) — case management.
 - **Wazuh** single-node (manager, indexer, dashboard) — alert source.
 - **agent-service** (FastAPI) — webhook receiver, Gemini agent loop, TheHive client.
@@ -63,7 +68,10 @@ so the triage router below is unaffected.
 ## Triage router (deterministic, no LLM)
 After the agent produces its analysis, a fixed-code router decides the action by
 `severity_score` (0–100, env thresholds) and dedups by `agent_name|rule_id|source_ip`:
-- **score < `TRIAGE_MEDIUM_THRESHOLD`** → auto-close (no case; memory + audit log only)
+- **score < `TRIAGE_MEDIUM_THRESHOLD`** → auto-close. Default is no case (memory + log only);
+  if `TRIAGE_LOW_CREATE_RESOLVED_CASE=true`, a case is created and **actually closed** in
+  TheHive (status `Indeterminate`, stage `Closed`) — TheHive 5 has no literal `Closed` status,
+  so closing sets a Closed-stage status and verifies the case reached that stage.
 - **medium ≤ score < `TRIAGE_HIGH_THRESHOLD`** → open `needs-review` case
 - **score ≥ `TRIAGE_HIGH_THRESHOLD`** → case + `flag` (escalated)
 - **dedup**: within `TRIAGE_DEDUP_WINDOW_HOURS` a repeat key suppresses the new case and
@@ -84,14 +92,62 @@ analysis. **All require** `Authorization: Bearer $OPERATOR_API_TOKEN` (in `.env`
   the identity and **re-embeds** with the same pipeline
 - `DELETE /memory/{id}` — remove a noisy/bad entry
 
+## Analyst console (`/console`)
+A server-rendered console (Jinja2 + HTMX, **no SPA**) that exposes the agent's reasoning,
+triage decisions, and memory store. It runs **inside the existing FastAPI service** (its own
+`app/console/` module, kept separate from the webhook path) and sits **alongside TheHive** —
+TheHive stays the case system of record; the console is a controller, not a case manager.
+
+**Architecture & auth.** Per-analyst local accounts (`users` table, argon2 password hashes).
+Session-based login via a signed cookie (`SESSION_SECRET_KEY`, Starlette `SessionMiddleware`).
+Create the first account with `docker compose exec agent-service python -m app.console.create_user`
+(interactive; no hardcoded credentials). The three auth planes are **fully independent**:
+the analyst **session** (humans), the `/memory` **operator token** (M2M), and the **webhook**
+(network-isolated on the compose network) — a session never grants token access and vice-versa.
+
+**Audit.** Every consequential analyst action writes an `audit_log` row attributed to the
+named analyst — **no action is anonymous**. Local DB actions write the action row and the
+audit row in **one transaction** (atomic); memory edits are **audited first** (a failed audit
+aborts the edit); TheHive actions are **verified against TheHive, then audited**.
+
+**Views**
+- **Triage queue** (`/console/`) — investigations with severity/label, attack type, host,
+  source IP, rule, triage action, dedup occurrence, and a link to the TheHive case; filter by
+  severity/action, search, paginate.
+- **Investigation detail** (`/console/investigations/{id}`) — full agent verdict, complete
+  tool-call trace, memory context, triage decision, and the layered analyst history.
+- **Memory browser** (`/console/memory`) — list/semantic-search/inspect/edit/delete, reusing
+  the locked embed pipeline (analysis-only edit does **not** re-embed; identity edit re-embeds).
+
+**Action set** (all audited)
+- Verdict **confirm / override** → `verdict_reviews`
+- Triage **correct / incorrect** feedback → `triage_feedback`
+- Memory **edit (analysis or identity) / delete**
+- TheHive **close / set-severity / comment** — via the existing service account, scope limited
+  to exactly these three; no tasks/observables/workflow.
+
+**Write-once investigation record.** The webhook persists each alert's agent output to
+`alert_investigations` (additive output-recording, after the pipeline, failure-isolated). The
+row is **immutable** — a DB trigger rejects `UPDATE` (insert/delete only). The agent's analysis
+and tool trace are ground truth; all human input (overrides, feedback) lives in the separate
+`verdict_reviews` / `triage_feedback` tables, layered on top.
+
+Console schema: `db/003_console.sql` (`users`, `audit_log`, `alert_investigations`,
+`verdict_reviews`, `triage_feedback`).
+
 ## Ports
 - TheHive UI/API `9000` (context path `/thehive`) · agent webhook `8000`
 - Wazuh dashboard `8443` · Wazuh indexer `9200` · manager `1514/1515/55000`
 - Postgres `127.0.0.1:5432`
 
-## Status — Phase 1 COMPLETE
-- [x] Step 1 — server inspection
-- [x] Step 2a — host prep (Docker, Compose, git, sysctl)
-- [x] Step 2b — Compose stack up & healthy
-- [x] Step 3 — agent service receives test webhook & produces analysis
-- [x] Step 4 — end-to-end: simulated alert → TheHive case
+## Status — Phases 1–5 COMPLETE
+- [x] **Phase 1** — end-to-end pipeline: simulated alert → agent analysis → TheHive case
+- [x] **Phase 1.5** — TheHive service account + admin rotation; Wazuh demo-password hardening
+- [x] **Phase 2** — semantic memory (pgvector RAG) + token-protected `/memory` operator API
+- [x] **Phase 3** — deterministic triage router with dedup/suppression
+- [x] **Phase 4** — read-only investigation agent (bounded tool choice, least-privilege indexer user)
+- [x] **Phase 5** — analyst console: session auth, full audit, triage queue / investigation
+      detail / memory browser, analyst actions (verdict, feedback, memory, TheHive case control),
+      write-once `alert_investigations` record
+- [x] **Fix** — low-severity auto-close now actually closes the TheHive case (was a no-op:
+      TheHive 5 rejects the literal `Closed` status)

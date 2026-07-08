@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Memory #{{ m.id }} · RAM v2{% endblock %}
+{% block content %}
+<p><a href="/console/memory">← Memory store</a></p>
+<h1>Memory #{{ m.id }}</h1>
+
+<section class="card">
+  <div class="kv">
+    <span>Host</span><span>{{ m.agent_name or '—' }}</span>
+    <span>Source IP</span><span class="mono">{{ m.source_ip or '—' }}</span>
+    <span>Rule</span><span class="mono">{{ m.rule_id or '—' }}</span>
+    <span>Event time</span><span class="muted">{{ (m.alert_timestamp or m.created_at) }}</span>
+  </div>
+</section>
+
+<h2>Analysis <span class="muted note">(editing this does NOT re-embed)</span></h2>
+<section class="card">
+  <form method="post" action="/console/memory/{{ m.id }}/analysis">
+    <textarea name="analysis" rows="12" class="code" spellcheck="false">{{ analysis_json }}</textarea>
+    <div><button type="submit">Save analysis (no re-embed)</button></div>
+  </form>
+</section>
+
+<h2>Identity / alert_text <span class="muted note">(editing this RE-EMBEDS via the locked pipeline)</span></h2>
+<section class="card">
+  <form method="post" action="/console/memory/{{ m.id }}/identity"
+        onsubmit="return confirm('Changing the identity text re-embeds this memory. Continue?')">
+    <textarea name="alert_text" rows="4" class="code" spellcheck="false">{{ m.alert_text or '' }}</textarea>
+    <div><button type="submit">Save identity &amp; re-embed</button></div>
+  </form>
+</section>
+
+<h2>Delete</h2>
+<section class="card">
+  <form method="post" action="/console/memory/{{ m.id }}/delete"
+        onsubmit="return confirm('Permanently delete memory #{{ m.id }}? This is audited.')">
+    <button type="submit" class="danger">Delete this memory</button>
+  </form>
+</section>
+{% endblock %}

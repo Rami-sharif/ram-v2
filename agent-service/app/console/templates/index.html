@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}Console · RAM v2{% endblock %}
+{% block content %}
+<h1>Welcome, {{ analyst.display_name }}</h1>
+<p>You are signed in as <strong>{{ analyst.username }}</strong> (role: {{ analyst.role }}).</p>
+<p class="muted">Triage queue, investigation detail, and memory browser are coming in the next step.</p>
+{% endblock %}

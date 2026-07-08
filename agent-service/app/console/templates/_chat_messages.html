@@ -1,0 +1,26 @@
+{% for m in messages %}
+<div class="chat-msg chat-{{ m.role }}">
+  <div class="chat-meta">
+    <strong>{{ 'You' if m.role == 'analyst' else 'Assistant' }}</strong>
+    <span class="muted">{{ m.actor }}</span>
+  </div>
+  <div class="chat-body">{{ m.message }}</div>
+  {% if m.referenced_case_ids %}
+  <div class="chat-refs">
+    <span class="muted">cases referenced:</span>
+    {% for cid in m.referenced_case_ids %}<a href="/console/investigations/{{ cid }}">#{{ cid }}</a>{% endfor %}
+  </div>
+  {% endif %}
+  {% if m.tool_calls %}
+  <ul class="chat-tools">
+    {% for t in m.tool_calls %}
+    <li class="{{ 'bad' if t.error else 'ok' }}">
+      <code>{{ t.tool }}</code>
+      {% if t.args %}<span class="muted mono">{{ t.args | tojson }}</span>{% endif %}
+      {% if t.error %}— <span class="err">{{ t.error }}</span>{% else %}— ok{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</div>
+{% endfor %}

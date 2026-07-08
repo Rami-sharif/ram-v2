@@ -116,18 +116,93 @@ def add_comment(case_id: str, message: str) -> bool:
 
 
 def close_case(case_id: str, summary: str) -> bool:
-    """Best-effort close (for the optional low-severity pre-resolved case path)."""
+    """Best-effort close for the low-severity auto-close path.
+
+    Delegates to close_case_strict (which sets a valid Closed-stage status —
+    TheHive 5 has no literal "Closed" status) and verifies the case actually
+    reached the Closed stage. Best-effort: never raises into the caller, but
+    logs loudly on failure so an auto-close can't silently leave a case open.
+    """
     if not get_settings().thehive_enabled:
         return False
     try:
-        resp = httpx.patch(
-            f"{_base()}/case/{case_id}",
-            json={"status": "Closed", "summary": summary, "impactStatus": "NotApplicable"},
-            headers=_headers(), timeout=get_settings().thehive_timeout,
-        )
-        if resp.status_code in (200, 204):
+        close_case_strict(case_id, summary)
+        if get_case(case_id).get("stage") == "Closed":
+            logger.info("Auto-closed TheHive case %s", case_id)
             return True
-        logger.warning("TheHive close failed: %s %s", resp.status_code, resp.text[:200])
-    except httpx.HTTPError as exc:
-        logger.warning("TheHive close request failed: %s", exc)
+        logger.error("TheHive case %s did not reach Closed stage after auto-close", case_id)
+    except TheHiveError as exc:
+        logger.warning("TheHive auto-close failed for %s: %s", case_id, exc)
     return False
+
+
+# --------------------------------------------------------------------------- #
+# Console-facing operations (analyst-driven, strict).
+# Scope is deliberately limited to exactly three case mutations — close,
+# severity, comment — plus read-backs used to verify the change landed.
+# No tasks / observables / workflow operations are exposed here.
+# --------------------------------------------------------------------------- #
+def severity_to_int(label: str) -> int:
+    """Map a severity label to TheHive's 1..4 scale (default medium)."""
+    return _SEVERITY_MAP.get((label or "").lower(), 2)
+
+
+def _request(method: str, path: str, **kw) -> httpx.Response:
+    if not get_settings().thehive_enabled:
+        raise TheHiveError("TheHive API key not configured")
+    try:
+        resp = httpx.request(method, f"{_base()}{path}", headers=_headers(),
+                             timeout=get_settings().thehive_timeout, **kw)
+    except httpx.HTTPError as exc:
+        raise TheHiveError(f"request failed: {exc}") from exc
+    return resp
+
+
+def get_case(case_id: str) -> dict[str, Any]:
+    """Read a case back (used to verify a mutation actually landed)."""
+    resp = _request("GET", f"/case/{case_id}")
+    if resp.status_code != 200:
+        raise TheHiveError(f"get case {case_id}: status {resp.status_code}: {resp.text[:200]}")
+    return resp.json()
+
+
+def get_case_comments(case_id: str) -> list[dict[str, Any]]:
+    """List a case's comments via the query API (to verify a comment landed)."""
+    body = {"query": [{"_name": "getCase", "idOrName": case_id}, {"_name": "comments"}]}
+    resp = _request("POST", "/query", json=body)
+    if resp.status_code != 200:
+        raise TheHiveError(f"list comments {case_id}: status {resp.status_code}: {resp.text[:200]}")
+    data = resp.json()
+    return data if isinstance(data, list) else []
+
+
+def set_severity(case_id: str, severity: int) -> None:
+    """Set ONLY the case severity (1..4). Raises TheHiveError on failure."""
+    if severity not in (1, 2, 3, 4):
+        raise TheHiveError(f"severity must be 1..4, got {severity}")
+    resp = _request("PATCH", f"/case/{case_id}", json={"severity": severity})
+    if resp.status_code not in (200, 204):
+        raise TheHiveError(f"set severity failed: {resp.status_code}: {resp.text[:200]}")
+
+
+def post_comment(case_id: str, message: str) -> None:
+    """Add a comment to a case. Raises TheHiveError on failure."""
+    resp = _request("POST", f"/case/{case_id}/comment", json={"message": message})
+    if resp.status_code not in (200, 201):
+        raise TheHiveError(f"comment failed: {resp.status_code}: {resp.text[:200]}")
+
+
+# TheHive 5 closes a case by setting its status to one whose stage is "Closed".
+# These are the resolution outcomes; the console exposes them as the close reason.
+CLOSED_STATUSES = ("Indeterminate", "TruePositive", "FalsePositive", "Duplicated", "Other")
+DEFAULT_CLOSE_STATUS = "Indeterminate"
+
+
+def close_case_strict(case_id: str, summary: str, status: str = DEFAULT_CLOSE_STATUS) -> None:
+    """Close a case (analyst-driven) by setting a Closed-stage status.
+    Raises TheHiveError on failure or an out-of-scope status."""
+    if status not in CLOSED_STATUSES:
+        raise TheHiveError(f"close status must be one of {CLOSED_STATUSES}")
+    resp = _request("PATCH", f"/case/{case_id}", json={"status": status, "summary": summary})
+    if resp.status_code not in (200, 204):
+        raise TheHiveError(f"close failed: {resp.status_code}: {resp.text[:200]}")

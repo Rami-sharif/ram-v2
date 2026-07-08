@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}RAM v2 Console{% endblock %}</title>
+  <link rel="stylesheet" href="/console/static/style.css">
+  <script src="/console/static/htmx.min.js" defer></script>
+  <script src="/console/static/console.js" defer></script>
+</head>
+<body>
+  {% if analyst %}
+  <header class="topbar">
+    <span class="brand">RAM v2 <span class="slash">/</span> Analyst Console</span>
+    <nav>
+      <a href="/console/">Queue</a>
+      <a href="/console/memory">Memory</a>
+    </nav>
+    <span class="who"><span class="status-led">active</span>{{ analyst.display_name }} ({{ analyst.role }})
+      · <a href="/console/logout">logout</a></span>
+  </header>
+  {% endif %}
+  <main class="content">
+    {% if msg %}<div class="flash ok">{{ msg.replace('+', ' ') }}</div>{% endif %}
+    {% if err %}<div class="flash bad">{{ err.replace('+', ' ') }}</div>{% endif %}
+    {% block content %}{% endblock %}
+  </main>
+  <div id="toast-container" aria-live="polite"></div>
+</body>
+</html>

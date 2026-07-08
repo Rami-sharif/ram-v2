@@ -13,7 +13,7 @@ class Settings(BaseSettings):
 
     # --- Gemini ---
     gemini_api_key: str
-    gemini_model: str = "gemini-2.0-flash"
+    gemini_model: str = "gemini-2.5-flash"
     gemini_timeout: float = 60.0
 
     # --- VirusTotal ---
@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     tool_max_hits: int = 10             # cap rows returned by indexer queries
     tool_related_window_minutes: int = 30
     tool_full_log_max_chars: int = 500  # truncate each full_log line
+    tool_max_agg_buckets: int = 20      # cap buckets returned by aggregate queries
 
     # --- PostgreSQL (semantic memory) ---
     postgres_host: str = "postgres"
@@ -70,8 +71,14 @@ class Settings(BaseSettings):
     # --- Logging ---
     agent_log_level: str = "INFO"
 
-    # --- Operator API (memory endpoints) ---
+    # --- Operator API (memory endpoints, machine-to-machine only) ---
     operator_api_token: str = ""
+
+    # --- Analyst console (session auth) ---
+    session_secret_key: str = ""
+    session_max_age_hours: int = 8
+    console_cookie_secure: bool = False  # set true behind TLS
+    console_thehive_public_url: str = "http://localhost:9000/thehive"  # for case deep-links
 
     # --- Triage router (severity_score is on the locked 0-100 scale) ---
     triage_medium_threshold: int = 40   # score < this => low (auto-close)

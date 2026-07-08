@@ -1,0 +1,191 @@
+{% extends "base.html" %}
+{% block title %}Investigation #{{ inv.id }} · RAM v2{% endblock %}
+{% block content %}
+<p><a href="/console/">← Triage queue</a></p>
+<div class="page-head">
+  <div class="readout">
+    <span>case <b>#{{ inv.case_number or inv.id }}</b></span>
+    <span>priority <b>{{ inv.severity_label or 'unknown' }}</b></span>
+    <span>route <b>{{ inv.triage_action or '—' }}</b></span>
+  </div>
+  <h1>Investigation #{{ inv.id }}</h1>
+  <p class="muted">The agent output is immutable; the analyst actions below layer on top with audit trails and clear next steps.</p>
+</div>
+
+<div class="detail-grid">
+  <section class="card">
+    <div class="panel-head">
+      <h2>Case snapshot</h2>
+      <span class="tag">{{ inv.triage_action or '—' }}</span>
+    </div>
+    <div class="kv">
+      <span>Alert id</span><span class="mono">{% if inv.alert_id %}<span class="copyable" data-copy="{{ inv.alert_id }}" title="click to copy">{{ inv.alert_id }}</span>{% else %}—{% endif %}</span>
+      <span>Recorded</span><span class="muted">{{ inv.created_at.strftime('%Y-%m-%d %H:%M:%S %Z') }}</span>
+      <span>Host</span><span>{{ inv.agent_name or '—' }}</span>
+      <span>Source IP</span><span class="mono">{% if inv.source_ip %}<span class="copyable" data-copy="{{ inv.source_ip }}" title="click to copy">{{ inv.source_ip }}</span>{% else %}—{% endif %}</span>
+      <span>Rule</span><span class="mono">{{ inv.rule_id or '—' }}</span>
+      <span>TheHive case</span>
+      <span>{% if case_url %}<a href="{{ case_url }}" target="_blank" rel="noopener">#{{ inv.case_number or 'open in TheHive' }}</a>{% else %}—{% endif %}</span>
+    </div>
+  </section>
+
+  <section class="card quick-actions">
+    <div class="panel-head">
+      <h2>Quick actions</h2>
+    </div>
+    <div class="action-stack">
+      <a class="action-tile" href="/console/">Jump to queue</a>
+      {% if case_url %}<a class="action-tile" href="{{ case_url }}" target="_blank" rel="noopener">Open TheHive case</a>{% endif %}
+      <a class="action-tile" href="#analyst-actions">Review analyst actions</a>
+      <a class="action-tile" href="#assistant">Ask assistant about this case</a>
+    </div>
+  </section>
+</div>
+
+<h2>Agent verdict <span class="muted note">(write-once, immutable)</span></h2>
+<section class="card">
+  <p><span class="sev sev-{{ inv.severity_label }}">{{ inv.severity_label }}</span>
+     <span class="muted">score {{ inv.severity_score }}</span>
+     &nbsp;·&nbsp; attack type: <strong>{{ inv.attack_type or '—' }}</strong></p>
+  <p><strong>Summary.</strong> {{ inv.analysis.summary or '—' }}</p>
+  <p><strong>Recommended action.</strong> {{ inv.analysis.recommended_action or '—' }}</p>
+  {% if inv.analysis.mitre %}
+  <p><strong>MITRE.</strong>
+    {% for m in inv.analysis.mitre %}
+      <span class="tag">{{ m.technique_id }}{% if m.technique %} · {{ m.technique }}{% endif %}</span>
+    {% endfor %}
+  </p>
+  {% endif %}
+</section>
+
+<h2>Triage decision</h2>
+<section class="card">
+  <p><span class="tag">{{ inv.triage_action or '—' }}</span>
+     <span class="muted">branch: {{ inv.triage_branch or '—' }}</span>
+     {% if inv.suppressed %}<span class="tag tag-mute">suppressed duplicate</span>{% endif %}
+     {% if inv.occurrence_count %}<span class="muted">· occurrence ×{{ inv.occurrence_count }}</span>{% endif %}
+  </p>
+</section>
+
+<h2>Memory context</h2>
+<section class="card">
+  <pre class="block">{{ inv.memory_context or 'No prior context.' }}</pre>
+  {% if retrieved %}
+  <p class="muted">Retrieved memory (snapshot taken when this alert was investigated):
+    {% for r in retrieved %}
+      {% if r.exists %}<a href="/console/memory/{{ r.id }}">#{{ r.id }}</a>{% else %}<span class="tag tag-mute" title="referenced by this investigation but no longer in the memory store">#{{ r.id }} · deleted / not found</span>{% endif %}{% if not loop.last %} {% endif %}
+    {% endfor %}
+  </p>
+  {% endif %}
+</section>
+
+<h2>Tool-call trace <span class="muted note">({{ inv.tool_trace | length }} step(s))</span></h2>
+<section class="card">
+  {% if inv.tool_trace %}
+  <ol class="trace">
+    {% for step in inv.tool_trace %}
+    <li>
+      <code class="tool">{{ step.tool }}</code>
+      <span class="muted">iter {{ step.iteration }}</span>
+      {% if step.error %}<span class="sev sev-high">error</span>{% endif %}
+      {% if step.reason %}<div class="reason">{{ step.reason }}</div>{% endif %}
+      {% if step.args %}<pre class="block">{{ step.args | tojson(indent=2) }}</pre>{% endif %}
+      {% if step.error %}<pre class="block err">{{ step.error }}</pre>{% endif %}
+    </li>
+    {% endfor %}
+  </ol>
+  {% else %}
+  <p class="muted">No tools were called for this alert.</p>
+  {% endif %}
+</section>
+
+<h2>Analyst actions <span class="muted note">(taken as {{ analyst.username }} — every action is audited)</span></h2>
+<section class="card actions" id="analyst-actions">
+  <div class="action-block">
+    <h3>Verdict</h3>
+    <form method="post" action="/console/investigations/{{ inv.id }}/verdict" class="inline">
+      <input type="hidden" name="action" value="confirm">
+      <input type="text" name="reason" placeholder="reason (optional)">
+      <button type="submit">Confirm agent verdict</button>
+    </form>
+    <form method="post" action="/console/investigations/{{ inv.id }}/verdict" class="row">
+      <input type="hidden" name="action" value="override">
+      <select name="severity_label">
+        <option value="">— severity —</option>
+        {% for s in severity_labels %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+      </select>
+      <input type="number" name="severity_score" min="0" max="100" placeholder="score">
+      <input type="text" name="attack_type" placeholder="attack type">
+      <input type="text" name="reason" placeholder="why override?">
+      <button type="submit">Override verdict</button>
+    </form>
+  </div>
+
+  <div class="action-block">
+    <h3>Triage feedback</h3>
+    <form method="post" action="/console/investigations/{{ inv.id }}/feedback" class="row">
+      <select name="rating">
+        <option value="correct">triage correct</option>
+        <option value="incorrect">triage incorrect</option>
+      </select>
+      <input type="text" name="reason" placeholder="reason (optional)">
+      <button type="submit">Submit feedback</button>
+    </form>
+  </div>
+
+  <div class="action-block">
+    <h3>TheHive case {% if not case_url %}<span class="muted">(no linked case)</span>{% endif %}</h3>
+    {% if case_url %}
+    <form method="post" action="/console/investigations/{{ inv.id }}/case/severity" class="row">
+      <select name="severity_label">
+        {% for s in severity_labels %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+      </select>
+      <button type="submit">Set case severity</button>
+    </form>
+    <form method="post" action="/console/investigations/{{ inv.id }}/case/comment" class="row">
+      <input type="text" name="message" placeholder="comment to add in TheHive" style="min-width:320px">
+      <button type="submit">Add comment</button>
+    </form>
+    <form method="post" action="/console/investigations/{{ inv.id }}/case/close" class="row"
+          onsubmit="return confirm('Close this case in TheHive?')">
+      <select name="resolution">
+        {% for r in close_statuses %}<option value="{{ r }}">{{ r }}</option>{% endfor %}
+      </select>
+      <input type="text" name="summary" placeholder="closing summary">
+      <button type="submit">Close case</button>
+    </form>
+    {% endif %}
+  </div>
+</section>
+
+<p class="muted note" id="assistant">💬 Ask the assistant about this case (or any other) from the
+  <a href="/console/">queue dashboard chat</a> — e.g. “what is the source IP for case
+  {{ inv.case_number or inv.id }}?”</p>
+
+<h2>Analyst input history <span class="muted note">(layered on top of the immutable agent output)</span></h2>
+<section class="card">
+  <h3>Verdict reviews</h3>
+  {% if reviews %}
+  <ul class="layered">
+    {% for r in reviews %}
+    <li><strong>{{ r.action }}</strong> by {{ r.actor_username }}
+      <span class="muted">{{ r.created_at.strftime('%Y-%m-%d %H:%M') }}</span>
+      {% if r.reason %}— {{ r.reason }}{% endif %}
+      {% if r.override_payload %}<pre class="block">{{ r.override_payload | tojson(indent=2) }}</pre>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}<p class="muted">None.</p>{% endif %}
+
+  <h3>Triage feedback</h3>
+  {% if feedback %}
+  <ul class="layered">
+    {% for f in feedback %}
+    <li><strong>{{ f.rating }}</strong> by {{ f.actor_username }}
+      <span class="muted">{{ f.created_at.strftime('%Y-%m-%d %H:%M') }}</span>
+      {% if f.reason %}— {{ f.reason }}{% endif %}</li>
+    {% endfor %}
+  </ul>
+  {% else %}<p class="muted">None.</p>{% endif %}
+</section>
+{% endblock %}

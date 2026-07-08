@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Memory · RAM v2{% endblock %}
+{% block content %}
+<h1>Memory store</h1>
+
+<form class="filters" method="get" action="/console/memory">
+  <input type="text" name="q" value="{{ q }}" placeholder="Semantic search (embeds query)">
+  <input type="text" name="agent_name" value="{{ agent_name }}" placeholder="host">
+  <input type="text" name="source_ip" value="{{ source_ip }}" placeholder="source ip">
+  <input type="text" name="rule_id" value="{{ rule_id }}" placeholder="rule id">
+  <button type="submit">Search</button>
+  <a class="muted" href="/console/memory">reset</a>
+</form>
+{% if q %}<p class="muted">Semantic search results (nearest first).</p>{% endif %}
+
+<table class="responsive">
+  <thead>
+    <tr><th>id</th><th>Time</th><th>Host</th><th>Source IP</th><th>Rule</th>
+      <th>Severity</th>{% if q %}<th>Sim</th>{% endif %}<th>Identity (alert_text)</th><th></th></tr>
+  </thead>
+  <tbody>
+    {% for m in rows %}
+    <tr>
+      <td data-label="id">{{ m.id }}</td>
+      <td data-label="Time" class="nowrap muted">{{ (m.alert_timestamp or m.created_at).strftime('%Y-%m-%d %H:%M') }}</td>
+      <td data-label="Host">{{ m.agent_name or '—' }}</td>
+      <td data-label="Source IP" class="mono">{% if m.source_ip %}<span class="copyable" data-copy="{{ m.source_ip }}" title="click to copy">{{ m.source_ip }}</span>{% else %}—{% endif %}</td>
+      <td data-label="Rule" class="mono">{{ m.rule_id or '—' }}</td>
+      <td data-label="Severity">{% if m.analysis %}<span class="sev sev-{{ m.analysis.severity_label }}">{{ m.analysis.severity_label }}</span>{% if m.analysis.severity_score is not none %} <span class="muted">{{ m.analysis.severity_score }}</span>{% endif %}{% else %}—{% endif %}</td>
+      {% if q %}<td data-label="Sim" class="muted">{{ '%.3f'|format(m.similarity) if m.similarity is not none else '—' }}</td>{% endif %}
+      <td data-label="Identity" class="mono snippet">{{ (m.alert_text or '')[:90] }}{% if (m.alert_text or '')|length > 90 %}…{% endif %}</td>
+      <td data-label=""><a href="/console/memory/{{ m.id }}">open</a></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="9" class="muted">No memory rows.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+{% if not q and total_pages > 1 %}
+<nav class="pager">
+  {% set qs = {'agent_name': agent_name, 'source_ip': source_ip, 'rule_id': rule_id} | urlencode %}
+  {% if page > 1 %}<a href="/console/memory?{{ qs }}&page={{ page - 1 }}">← prev</a>{% else %}<span class="muted">← prev</span>{% endif %}
+  <span class="muted">page {{ page }}</span>
+  {% if page < total_pages %}<a href="/console/memory?{{ qs }}&page={{ page + 1 }}">next →</a>{% else %}<span class="muted">next →</span>{% endif %}
+</nav>
+{% endif %}
+{% endblock %}

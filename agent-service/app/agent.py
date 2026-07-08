@@ -151,3 +151,138 @@ def run_agent(
         except Exception:  # noqa: BLE001
             logger.exception("Forced submit invalid; using fallback analysis")
     return _fallback_analysis(alert), evidence, trace
+
+
+# --------------------------------------------------------------------------- #
+# Dashboard-level interactive chat (Phase 6, console only).
+#
+# Reuses the bounded tool-choice loop, but: (a) allowed tools = read-only
+# registry + query_wazuh_logs + case-lookup tools + audited action tools;
+# (b) NO submit_analysis — the loop ends when the model responds in text with no
+# tool call; (c) it can ACT (audited) because the analyst's identity rides in the
+# ToolContext; (d) NO case is preloaded — the assistant looks up any case the
+# analyst names via get_investigation_by_case_number, which also focuses the
+# context so a same-turn action targets that case. run_agent is untouched.
+# --------------------------------------------------------------------------- #
+INTERACTIVE_SYSTEM_INSTRUCTION = (
+    "You are a SOC analyst's assistant embedded in the RAM v2 console dashboard. The analyst "
+    "chats with you freely and may ask about ANY case by its TheHive case number, compare cases, "
+    "or ask general investigation questions. NO case is preloaded for you. "
+    "When the analyst references a case (e.g. 'case 13'), call get_investigation_by_case_number to "
+    "pull its stored details (severity, source IP, rule, attack type, analysis) before answering — "
+    "for a comparison like 'is the IP for case 13 and 14 the same', look each one up and compare. "
+    "To check whether an IP or file hash appeared in other cases, use "
+    "search_investigations_by_indicator. Use query_wazuh_logs for custom Wazuh log filters/counts. "
+    "You may also take a small set of AUDITED actions — record a verdict confirm/override, record "
+    "triage feedback, and close / set-severity / comment on a TheHive case — but ONLY on a case you "
+    "have just looked up in THIS turn with get_investigation_by_case_number, and ONLY when the "
+    "analyst clearly asks. Always look the case up again in the current turn before acting on it, "
+    "even if it was discussed earlier. Confirm what you did. Every action is attributed to the "
+    "logged-in analyst and audited automatically. Each tool call must include a short 'reason'. "
+    "When you have nothing left to do, reply in plain text (no tool call) and the turn ends."
+)
+
+
+def _first_text(response: Any) -> str:
+    parts: list[str] = []
+    for cand in response.candidates or []:
+        for part in (cand.content.parts or []) if cand.content else []:
+            if getattr(part, "text", None):
+                parts.append(part.text)
+    return "\n".join(parts).strip()
+
+
+def _interactive_config(registry: dict) -> types.GenerateContentConfig:
+    """AUTO mode: the model may call an allowed tool OR reply with text (ending the turn)."""
+    declarations = tools.build_declarations(registry)
+    return types.GenerateContentConfig(
+        system_instruction=INTERACTIVE_SYSTEM_INSTRUCTION,
+        temperature=0.2,
+        tools=[types.Tool(function_declarations=declarations)],
+        tool_config=types.ToolConfig(
+            function_calling_config=types.FunctionCallingConfig(mode="AUTO")
+        ),
+    )
+
+
+def _text_only_config() -> types.GenerateContentConfig:
+    return types.GenerateContentConfig(
+        system_instruction=INTERACTIVE_SYSTEM_INSTRUCTION, temperature=0.2
+    )
+
+
+def _collect_referenced(result: Any, acc: list[int]) -> None:
+    """Accumulate alert_investigations.id values a chat turn touched, so the stored
+    agent message can link them. Reads the compact shapes returned by the two
+    case-lookup tools (a single investigation_id, or a matches[] list)."""
+    if not isinstance(result, dict):
+        return
+    iid = result.get("investigation_id")
+    if isinstance(iid, int) and iid not in acc:
+        acc.append(iid)
+    for m in result.get("matches") or []:
+        mid = m.get("investigation_id") if isinstance(m, dict) else None
+        if isinstance(mid, int) and mid not in acc:
+            acc.append(mid)
+
+
+def run_interactive(
+    message: str, analyst_username: str, history: list[dict] | None = None,
+) -> tuple[str, list[dict[str, Any]], list[int]]:
+    """Run one dashboard chat turn. Returns (reply_text, tool_calls, referenced_ids).
+
+    No case is anchored up front: the assistant looks up any case the analyst names
+    via get_investigation_by_case_number, which also focuses ctx.investigation so a
+    same-turn audited action targets that case. `history` is the prior conversation
+    as [{role: 'analyst'|'agent', message}]. Actions taken here go through the same
+    audited tool functions, so every consequential action still produces its own
+    audit_log row. `referenced_ids` are the investigation ids this turn discussed."""
+    settings = get_settings()
+    client = genai.Client(api_key=settings.gemini_api_key)
+    # Start with no focused case and an empty alert; the case-lookup tool sets
+    # ctx.investigation when the analyst references a case. Identity is fixed to
+    # the authenticated session — never taken from the model.
+    ctx = tools.ToolContext(
+        alert=WazuhAlert(), analyst_username=analyst_username, investigation=None,
+    )
+    registry = {**tools.TOOL_REGISTRY, **tools.INTERACTIVE_REGISTRY, **tools.ACTION_REGISTRY}
+
+    contents: list[types.Content] = []
+    for h in history or []:
+        role = "user" if h.get("role") == "analyst" else "model"
+        contents.append(types.Content(role=role, parts=[types.Part(text=h.get("message") or "")]))
+    contents.append(types.Content(role="user", parts=[types.Part(text=message)]))
+
+    tool_calls: list[dict[str, Any]] = []
+    referenced: list[int] = []
+
+    for iteration in range(1, settings.agent_max_iterations + 1):
+        response = client.models.generate_content(
+            model=settings.gemini_model, contents=contents, config=_interactive_config(registry)
+        )
+        fc = _first_function_call(response)
+        if fc is None:  # model replied with text -> turn ends
+            return (_first_text(response) or "(no response)"), tool_calls, referenced
+
+        args = dict(fc.args)
+        reason = args.get("reason", "")
+        logger.info("CHAT tool_call analyst=%s iter=%s tool=%s args=%s reason=%r",
+                    analyst_username, iteration, fc.name,
+                    {k: v for k, v in args.items() if k != "reason"}, reason)
+        result = tools.dispatch(fc.name, args, ctx, registry=registry)
+        _collect_referenced(result, referenced)
+        tool_calls.append({"iteration": iteration, "tool": fc.name,
+                           "args": {k: v for k, v in args.items() if k != "reason"},
+                           "reason": reason, "error": result.get("error"),
+                           "ok": result.get("ok", result.get("error") is None)})
+        contents.append(response.candidates[0].content)
+        contents.append(types.Content(role="user", parts=[
+            types.Part.from_function_response(name=fc.name, response={"result": result})
+        ]))
+
+    # Cap reached while still calling tools: force a closing text summary.
+    logger.info("CHAT cap reached (analyst=%s); requesting closing text", analyst_username)
+    response = client.models.generate_content(
+        model=settings.gemini_model, contents=contents, config=_text_only_config()
+    )
+    return (_first_text(response) or "(reached tool limit for this turn)"), tool_calls, referenced

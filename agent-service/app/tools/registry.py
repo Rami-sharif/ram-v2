@@ -9,7 +9,7 @@ the result so a noisy host can't blow up the prompt.
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from ..config import get_settings
 from ..schemas import WazuhAlert
@@ -19,8 +19,18 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ToolContext:
-    """Shared, read-only context passed to every tool handler."""
+    """Shared context passed to every tool handler.
+
+    The automated read-only path (run_agent) constructs this with only `alert`.
+    The interactive console chat additionally sets `analyst_username` (the
+    authenticated session identity — NEVER taken from the model's arguments) and
+    `investigation` (the write-once record the chat is anchored to) so audited
+    action tools can attribute and target their effects. Defaults keep the
+    automated path byte-for-byte unchanged.
+    """
     alert: WazuhAlert
+    analyst_username: Optional[str] = None
+    investigation: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -45,19 +55,33 @@ class Tool:
         }
 
 
+# The read-only registry the automated agent (run_agent) reads from. Its contents
+# are the locked Phase-4 toolset; nothing new is added here (see INTERACTIVE_REGISTRY).
 TOOL_REGISTRY: dict[str, Tool] = {}
+
+# Interactive-only read tools (e.g. query_wazuh_logs). Deliberately SEPARATE from
+# TOOL_REGISTRY so the automated agent's toolset stays unchanged; only the console
+# chat loop merges this in.
+INTERACTIVE_REGISTRY: dict[str, Tool] = {}
 
 
 def register(tool: Tool) -> None:
     TOOL_REGISTRY[tool.name] = tool
 
 
-def build_declarations() -> list[dict]:
-    return [t.declaration() for t in TOOL_REGISTRY.values()]
+def register_interactive(tool: Tool) -> None:
+    """Register a read tool available ONLY to the interactive console chat."""
+    INTERACTIVE_REGISTRY[tool.name] = tool
 
 
-def allowed_names() -> list[str]:
-    return list(TOOL_REGISTRY.keys())
+def build_declarations(registry: Optional[dict[str, "Tool"]] = None) -> list[dict]:
+    reg = TOOL_REGISTRY if registry is None else registry
+    return [t.declaration() for t in reg.values()]
+
+
+def allowed_names(registry: Optional[dict[str, "Tool"]] = None) -> list[str]:
+    reg = TOOL_REGISTRY if registry is None else registry
+    return list(reg.keys())
 
 
 def _size(obj: Any) -> int:
@@ -86,9 +110,15 @@ def cap_result(result: dict) -> dict:
     return r
 
 
-def dispatch(name: str, args: dict, ctx: ToolContext) -> dict:
-    """Run a tool by name. Returns a result dict; failures become {'error': ...}."""
-    tool = TOOL_REGISTRY.get(name)
+def dispatch(name: str, args: dict, ctx: ToolContext,
+             registry: Optional[dict[str, "Tool"]] = None) -> dict:
+    """Run a tool by name. Returns a result dict; failures become {'error': ...}.
+
+    `registry` defaults to TOOL_REGISTRY (the automated read-only path). The
+    interactive chat passes its merged registry (read-only + query_wazuh_logs +
+    audited action tools)."""
+    reg = TOOL_REGISTRY if registry is None else registry
+    tool = reg.get(name)
     if tool is None:  # defense-in-depth: the model can only name declared tools anyway
         return {"error": f"unknown tool '{name}'"}
     call_args = {k: v for k, v in args.items() if k != "reason"}
