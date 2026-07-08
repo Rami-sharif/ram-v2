@@ -154,12 +154,67 @@ def format_memories_for_prompt(memories: list[dict[str, Any]]) -> str:
         else:
             tag = "recent"
         when = m.get("alert_timestamp") or m.get("created_at")
-        lines.append(
+        line = (
             f"- [{tag}] {when} | {m['alert_text']} "
             f"=> severity={a.get('severity_label')}({a.get('severity_score')}), "
             f"attack={a.get('attack_type')}, action={a.get('recommended_action')}"
         )
+        # Human ground truth (the learning loop): if an analyst reviewed a similar
+        # prior alert, surface their verdict prominently so the agent can weight it.
+        if a.get("human_reviewed"):
+            hv = a.get("human_verdict") or {}
+            if a.get("human_action") == "override":
+                line += (
+                    f"  ✎ ANALYST-CORRECTED → severity={hv.get('severity_label')}"
+                    f"({hv.get('severity_score')}), attack={hv.get('attack_type')}"
+                    f" [by {a.get('reviewed_by')}]"
+                )
+            else:
+                line += f"  ✓ ANALYST-CONFIRMED [by {a.get('reviewed_by')}]"
+        lines.append(line)
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# Learning loop: fold an analyst's verdict back into the alert's memory row.
+# --------------------------------------------------------------------------- #
+def record_human_verdict(investigation: dict[str, Any], *, action: str,
+                         override_payload: Optional[dict[str, Any]],
+                         actor: str) -> Optional[dict[str, Any]]:
+    """Stamp an analyst's confirm/override onto the memory row for this alert, so
+    future retrievals of similar alerts carry human ground truth. Reuses
+    update_analysis (NO re-embed — the vector is built from the alert identity).
+    Best-effort by contract: the caller wraps this and never fails the verdict on
+    a memory error. Returns the updated memory row, or None if nothing to update."""
+    memory_id = investigation.get("memory_id")
+    if not memory_id:
+        return None  # pre-loop investigation (no linked memory row) — nothing to teach
+    row = get_memory(memory_id)
+    if row is None:
+        return None
+    payload = override_payload or {}
+    if action == "override":
+        verdict = {
+            "severity_label": payload.get("severity_label") or investigation.get("severity_label"),
+            "severity_score": payload.get("severity_score")
+                if payload.get("severity_score") is not None else investigation.get("severity_score"),
+            "attack_type": payload.get("attack_type") or investigation.get("attack_type"),
+        }
+    else:  # confirm: the agent's own verdict is now analyst-confirmed ground truth
+        verdict = {
+            "severity_label": investigation.get("severity_label"),
+            "severity_score": investigation.get("severity_score"),
+            "attack_type": investigation.get("attack_type"),
+        }
+    analysis = dict(row.get("analysis") or {})
+    analysis.update({
+        "human_reviewed": True,
+        "human_action": action,
+        "human_verdict": verdict,
+        "reviewed_by": actor,
+    })
+    logger.info("Learning loop: memory id=%s stamped human_%s by %s", memory_id, action, actor)
+    return update_analysis(memory_id, analysis)
 
 
 # --------------------------------------------------------------------------- #
@@ -197,6 +252,7 @@ def list_memories(
     rule_id: Optional[str] = None,
     date_from: Optional[datetime] = None,
     date_to: Optional[datetime] = None,
+    reviewed_only: bool = False,
     limit: int = 50,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
@@ -207,6 +263,8 @@ def list_memories(
         clauses.append("source_ip = %s"); params.append(source_ip)
     if rule_id:
         clauses.append("rule_id = %s"); params.append(rule_id)
+    if reviewed_only:
+        clauses.append("(analysis->>'human_reviewed') = 'true'")
     if date_from:
         clauses.append("COALESCE(alert_timestamp, created_at) >= %s"); params.append(date_from)
     if date_to:

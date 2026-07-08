@@ -111,6 +111,64 @@
     }
   });
 
+  /* --- global assistant dock ---------------------------------------------- */
+  var dockLoaded = false;
+  function dock() { return document.getElementById("assistant-dock"); }
+  function openDock() {
+    var d = dock();
+    if (!d) return;
+    d.classList.add("open");
+    d.setAttribute("aria-hidden", "false");
+    var bd = document.getElementById("assistant-backdrop");
+    if (bd) bd.hidden = false;
+    var tog = document.getElementById("assistant-toggle");
+    if (tog) tog.setAttribute("aria-expanded", "true");
+    // lazy-load the thread on first open (htmx custom trigger on #chat-log)
+    if (!dockLoaded) {
+      dockLoaded = true;
+      var log = chatLog();
+      if (log && window.htmx) window.htmx.trigger(log, "dockopen");
+    }
+    var ta = d.querySelector(".chat-form textarea");
+    if (ta) ta.focus();
+    scrollChat();
+  }
+  function closeDock() {
+    var d = dock();
+    if (!d) return;
+    d.classList.remove("open");
+    d.setAttribute("aria-hidden", "true");
+    var bd = document.getElementById("assistant-backdrop");
+    if (bd) bd.hidden = true;
+    var tog = document.getElementById("assistant-toggle");
+    if (tog) tog.setAttribute("aria-expanded", "false");
+  }
+  function dockOpen() { return dock() && dock().classList.contains("open"); }
+
+  document.addEventListener("click", function (e) {
+    if (e.target.closest && e.target.closest("#assistant-toggle, [data-open-assistant]")) {
+      e.preventDefault();
+      dockOpen() ? closeDock() : openDock();
+      return;
+    }
+    if (e.target.closest && e.target.closest("#assistant-close, #assistant-backdrop")) {
+      closeDock();
+    }
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && dockOpen()) closeDock();
+  });
+
+  /* --- queue row click-through -------------------------------------------- */
+  // Whole row opens the investigation, except when a link/button/copyable cell
+  // was the actual click target (those keep their own behavior).
+  document.addEventListener("click", function (e) {
+    var row = e.target.closest ? e.target.closest("tr[data-href]") : null;
+    if (!row) return;
+    if (e.target.closest("a, button, [data-copy]")) return;
+    window.location.href = row.getAttribute("data-href");
+  });
+
   document.addEventListener("DOMContentLoaded", function () {
     scrollChat();
     document.querySelectorAll(".flash").forEach(function (f) {

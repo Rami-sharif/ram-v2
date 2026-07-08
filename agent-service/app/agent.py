@@ -28,7 +28,11 @@ SYSTEM_INSTRUCTION = (
     "look up file hashes for a pure login/brute-force alert, and do not query user-login "
     "activity for a malware/file alert). Each tool call must include a short 'reason'. "
     "When you have enough evidence, call submit_analysis exactly once with your verdict. "
-    "Let the Wazuh rule level and any malicious enrichment drive severity."
+    "Let the Wazuh rule level and any malicious enrichment drive severity. "
+    "If the prior related alerts include a human decision (marked ANALYST-CORRECTED or "
+    "ANALYST-CONFIRMED), treat that analyst verdict as authoritative ground truth for "
+    "closely similar alerts: align your severity_label, severity_score and attack_type "
+    "with it unless THIS alert clearly differs, and say so in your summary."
 )
 
 DEFAULT_MEMORY_CONTEXT = "No prior related alerts recorded for this host."

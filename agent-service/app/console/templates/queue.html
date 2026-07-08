@@ -3,39 +3,16 @@
 {% block content %}
 <div class="page-head">
   <div class="readout">
-    <span>workspace <b>{{ total }} investigations</b></span>
     <span>focus <b>{% if severity %}{{ severity }}{% else %}all severities{% endif %}</b></span>
-    <span>queue <b>{% if action %}{{ action }}{% else %}mixed{% endif %}</b></span>
+    <span>queue <b>{% if action %}{{ action }}{% elif show_all %}all{% else %}actionable{% endif %}</b></span>
+    <span>showing <b>{{ total }} record(s)</b></span>
   </div>
   <h1>Triage queue</h1>
-  <p class="muted">Keep the highest-signal alerts at the top of mind, then move into the detail view for the full context trail.</p>
+  <p class="muted">The highest-signal alerts first. Open any row for the full context trail.</p>
 </div>
 
-<section class="summary-grid" aria-label="Queue summaries">
-  <article class="summary-card">
-    <span class="summary-label">Open queue</span>
-    <strong>{{ total }}</strong>
-    <span class="muted">records currently in view</span>
-  </article>
-  <article class="summary-card">
-    <span class="summary-label">High / critical</span>
-    <strong>{{ summary.high }}</strong>
-    <span class="muted">requires fast attention</span>
-  </article>
-  <article class="summary-card">
-    <span class="summary-label">Flagged for review</span>
-    <strong>{{ summary.flagged }}</strong>
-    <span class="muted">triage action pending</span>
-  </article>
-  <article class="summary-card">
-    <span class="summary-label">Linked cases</span>
-    <strong>{{ summary.linked_cases }}</strong>
-    <span class="muted">already tracked in TheHive</span>
-  </article>
-</section>
-
 <div class="filters-bar">
-  <form class="filters" method="get" action="/console/">
+  <form class="filters" method="get" action="/console/queue">
     <input type="text" name="q" value="{{ q }}" placeholder="Search alert id / host / source ip">
     <select name="severity">
       <option value="">any severity</option>
@@ -49,60 +26,32 @@
         <option value="{{ a }}" {% if a == action %}selected{% endif %}>{{ a }}</option>
       {% endfor %}
     </select>
+    {% if show_all %}<input type="hidden" name="show" value="all">{% endif %}
     <button type="submit">Filter</button>
-    <a class="muted" href="/console/">reset</a>
+    <a class="muted" href="/console/queue">reset</a>
   </form>
   <div class="quick-filters">
-    <a class="chip" href="/console/?severity=high">high priority</a>
-    <a class="chip" href="/console/?action=create_flagged">flagged</a>
-    <a class="chip" href="/console/?action=suppress_duplicate">duplicates</a>
-  </div>
-</div>
-
-<section class="card chat-panel">
-  <div class="chat-head">
-    <h2>Assistant</h2>
-    <span class="muted note">Ask about any case by number, compare cases, or query the logs —
-      e.g. “what is the source IP for case 13?” · “is the IP for case 13 and 14 the same?”</span>
-  </div>
-  <div id="chat-log" class="chat-log">
-    {% if chat %}
-      {% with messages = chat %}{% include "_chat_messages.html" %}{% endwith %}
+    <a class="chip" href="/console/queue?severity=high">high priority</a>
+    <a class="chip" href="/console/queue?action=create_flagged">flagged</a>
+    <a class="chip" href="/console/queue?action=suppress_duplicate">duplicates</a>
+    {% if show_all %}
+      <a class="chip chip-on" href="/console/queue?{{ {'q': q, 'severity': severity, 'action': action} | urlencode }}">actionable only</a>
     {% else %}
-      <p class="muted" id="chat-empty">No messages yet. Ask a question about any recorded case,
-        check whether an IP or hash appeared elsewhere, or request an audited action on a case.</p>
+      <a class="chip" href="/console/queue?{{ {'q': q, 'severity': severity, 'action': action, 'show': 'all'} | urlencode }}">show resolved</a>
     {% endif %}
   </div>
-  <div class="chat-prompts">
-    <button type="button" class="secondary chip" data-fill-prompt="Summarize the latest high-severity alerts and note any overlaps.">brief overview</button>
-    <button type="button" class="secondary chip" data-fill-prompt="Compare the source IPs and case numbers for the latest flagged alerts.">compare cases</button>
-    <button type="button" class="secondary chip" data-fill-prompt="Find the most recent case linked to the same host and summarize it.">host pivot</button>
-  </div>
-  <form class="chat-form"
-        hx-post="/console/chat"
-        hx-target="#chat-log" hx-swap="beforeend"
-        hx-on::after-request="if(event.detail.successful){this.reset();var e=document.getElementById('chat-empty');if(e)e.remove();}">
-    <textarea name="message" rows="2" required
-      placeholder="Ask the assistant… (Enter to send, Shift+Enter for a newline)"></textarea>
-    <button type="submit">Send</button>
-  </form>
-  <p class="muted note">The assistant may take audited actions (verdict, triage feedback, case
-    close / severity / comment) on a case you name when you ask; each is attributed to
-    {{ analyst.username }} and written to the audit log.</p>
-</section>
-
-<p class="muted">{{ total }} record(s){% if q or severity or action %} (filtered){% endif %}</p>
+</div>
 
 <table class="responsive">
   <thead>
     <tr>
       <th>Time</th><th>Severity</th><th>Attack type</th><th>Host</th>
-      <th>Source IP</th><th>Rule</th><th>Triage</th><th>Seen</th><th>Case</th><th></th>
+      <th>Source IP</th><th>Rule</th><th>Triage</th><th>Review</th><th>Seen</th><th>Case</th><th></th>
     </tr>
   </thead>
   <tbody>
     {% for r in rows %}
-    <tr class="row sev-row-{{ r.severity_label }}">
+    <tr class="row sev-row-{{ r.severity_label }}" data-href="/console/investigations/{{ r.id }}">
       <td data-label="Time" class="nowrap muted">{{ r.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
       <td data-label="Severity"><span class="sev sev-{{ r.severity_label }}">{{ r.severity_label }}</span>
           <span class="muted">{{ r.severity_score }}</span></td>
@@ -112,23 +61,29 @@
       <td data-label="Rule" class="mono">{{ r.rule_id or '—' }}</td>
       <td data-label="Triage"><span class="tag">{{ r.triage_action or '—' }}</span>
           {% if r.suppressed %}<span class="tag tag-mute">suppressed</span>{% endif %}</td>
+      <td data-label="Review">
+        {% if r.review_status == 'confirmed' or r.review_status == 'confirm' %}<span class="tag review-confirmed">✓ confirmed</span>
+        {% elif r.review_status == 'override' %}<span class="tag review-corrected">✎ corrected</span>
+        {% else %}<span class="muted">unreviewed</span>{% endif %}</td>
       <td data-label="Seen">{% if r.occurrence_count %}×{{ r.occurrence_count }}{% else %}—{% endif %}</td>
       <td data-label="Case">{% if r.case_number %}<span class="copyable" data-copy="{{ r.case_number }}" title="click to copy case number">#{{ r.case_number }}</span>{% endif %}
           {% if r.case_url %}<a href="{{ r.case_url }}" target="_blank" rel="noopener">↗</a>{% elif not r.case_number %}—{% endif %}</td>
       <td data-label=""><a href="/console/investigations/{{ r.id }}">open</a></td>
     </tr>
     {% else %}
-    <tr><td colspan="10" class="muted">No investigations recorded yet.</td></tr>
+    <tr><td colspan="11" class="muted">
+      {% if show_all %}No investigations recorded yet.{% else %}No actionable investigations — <a href="/console/queue?show=all">show resolved</a>.{% endif %}
+    </td></tr>
     {% endfor %}
   </tbody>
 </table>
 
 {% if total_pages > 1 %}
 <nav class="pager">
-  {% set qs = {'q': q, 'severity': severity, 'action': action} | urlencode %}
-  {% if page > 1 %}<a href="/console/?{{ qs }}&page={{ page - 1 }}">← prev</a>{% else %}<span class="muted">← prev</span>{% endif %}
+  {% set qs = {'q': q, 'severity': severity, 'action': action, 'show': 'all' if show_all else ''} | urlencode %}
+  {% if page > 1 %}<a href="/console/queue?{{ qs }}&page={{ page - 1 }}">← prev</a>{% else %}<span class="muted">← prev</span>{% endif %}
   <span class="muted">page {{ page }} / {{ total_pages }}</span>
-  {% if page < total_pages %}<a href="/console/?{{ qs }}&page={{ page + 1 }}">next →</a>{% else %}<span class="muted">next →</span>{% endif %}
+  {% if page < total_pages %}<a href="/console/queue?{{ qs }}&page={{ page + 1 }}">next →</a>{% else %}<span class="muted">next →</span>{% endif %}
 </nav>
 {% endif %}
 {% endblock %}

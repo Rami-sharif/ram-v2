@@ -13,10 +13,17 @@
   <header class="topbar">
     <span class="brand">RAM v2 <span class="slash">/</span> Analyst Console</span>
     <nav>
-      <a href="/console/">Queue</a>
-      <a href="/console/memory">Memory</a>
+      <a href="/console/"{% if nav == 'overview' %} class="active"{% endif %}>Overview</a>
+      <a href="/console/queue"{% if nav == 'queue' %} class="active"{% endif %}>Queue</a>
+      <a href="/console/agent"{% if nav == 'agent' %} class="active"{% endif %}>Agent</a>
+      <a href="/console/memory"{% if nav == 'memory' %} class="active"{% endif %}>Memory</a>
     </nav>
-    <span class="who"><span class="status-led">active</span>{{ analyst.display_name }} ({{ analyst.role }})
+    <span class="who">
+      {% if not hide_dock %}
+      <button type="button" class="assistant-toggle" id="assistant-toggle"
+              aria-controls="assistant-dock" aria-expanded="false">Assistant</button>
+      {% endif %}
+      <span class="status-led">active</span>{{ analyst.display_name }} ({{ analyst.role }})
       · <a href="/console/logout">logout</a></span>
   </header>
   {% endif %}
@@ -25,6 +32,7 @@
     {% if err %}<div class="flash bad">{{ err.replace('+', ' ') }}</div>{% endif %}
     {% block content %}{% endblock %}
   </main>
+  {% if analyst and not hide_dock %}{% include "_assistant_dock.html" %}{% endif %}
   <div id="toast-container" aria-live="polite"></div>
 </body>
 </html>

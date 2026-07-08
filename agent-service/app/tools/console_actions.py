@@ -14,7 +14,7 @@ Two invariants, identical to the console's HTTP routes:
 """
 import logging
 
-from .. import thehive
+from .. import memory, thehive
 from ..console import store
 from .registry import Tool, ToolContext
 
@@ -59,6 +59,11 @@ def _record_verdict_review(args: dict, ctx: ToolContext) -> dict:
         investigation_id=inv["id"], actor_username=actor, action=action,
         override_payload=payload, reason=(args.get("reason") or None), before=before,
     )
+    # Learning loop: fold this verdict into the alert's memory row (best-effort).
+    try:
+        memory.record_human_verdict(inv, action=action, override_payload=payload, actor=actor)
+    except Exception:  # noqa: BLE001
+        logger.exception("Learning-loop memory update failed (verdict recorded)")
     return {"ok": True, "action": f"verdict_{action}", "review_id": review_id}
 
 

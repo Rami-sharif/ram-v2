@@ -5,6 +5,7 @@ The audit_log write is the spine of accountability — every consequential analy
 action calls write_audit() with the named actor.
 """
 import logging
+import secrets
 from typing import Any, Optional
 
 from psycopg.rows import dict_row
@@ -41,20 +42,25 @@ def record_investigation(
     *, alert_id, agent_name, source_ip, rule_id, severity_score, severity_label,
     attack_type, analysis, tool_trace, memory_context, retrieved_ids,
     triage_action, triage_branch, occurrence_count, suppressed, case_id, case_number,
+    memory_id=None,
 ) -> int:
     """Insert the agent's output for one alert. Write-once: the row is never
-    UPDATEd (DB trigger enforces this). Human input lives in separate tables."""
+    UPDATEd (DB trigger enforces this). Human input lives in separate tables.
+    memory_id links this alert's own semantic-memory row so a later analyst
+    verdict can teach it back (the learning loop)."""
     with get_pool().connection() as conn, conn.cursor() as cur:
         cur.execute(
             "INSERT INTO alert_investigations ("
             " alert_id, agent_name, source_ip, rule_id, severity_score, severity_label,"
             " attack_type, analysis, tool_trace, memory_context, retrieved_ids,"
-            " triage_action, triage_branch, occurrence_count, suppressed, case_id, case_number"
-            ") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+            " triage_action, triage_branch, occurrence_count, suppressed, case_id, case_number,"
+            " memory_id"
+            ") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
             (alert_id, agent_name, source_ip, rule_id, severity_score, severity_label,
              attack_type, Json(analysis), Json(tool_trace), memory_context,
              Json(retrieved_ids) if retrieved_ids is not None else None,
-             triage_action, triage_branch, occurrence_count, suppressed, case_id, case_number),
+             triage_action, triage_branch, occurrence_count, suppressed, case_id, case_number,
+             memory_id),
         )
         return cur.fetchone()[0]
 
@@ -67,13 +73,21 @@ _QUEUE_COLS = (
 
 
 def list_investigations(*, severity_label=None, triage_action=None, agent_name=None,
-                        search=None, limit=25, offset=0):
-    """Triage queue: filtered, paginated. Returns (rows, total_count)."""
+                        search=None, exclude_actions=(), limit=25, offset=0):
+    """Triage queue: filtered, paginated. Returns (rows, total_count).
+
+    `exclude_actions` drops rows whose triage_action is in the given collection
+    (used for the queue's default 'actionable only' view, which hides auto_close).
+    Ignored when an explicit `triage_action` filter is supplied."""
     where, params = [], []
     if severity_label:
         where.append("severity_label = %s"); params.append(severity_label)
     if triage_action:
         where.append("triage_action = %s"); params.append(triage_action)
+    elif exclude_actions:
+        placeholders = ", ".join(["%s"] * len(exclude_actions))
+        where.append(f"triage_action NOT IN ({placeholders})")
+        params.extend(exclude_actions)
     if agent_name:
         where.append("agent_name = %s"); params.append(agent_name)
     if search:
@@ -84,11 +98,119 @@ def list_investigations(*, severity_label=None, triage_action=None, agent_name=N
         cur.execute(f"SELECT count(*) AS n FROM alert_investigations{clause}", params)
         total = cur.fetchone()["n"]
         cur.execute(
-            f"SELECT {_QUEUE_COLS} FROM alert_investigations{clause} "
+            f"SELECT {_QUEUE_COLS}, "
+            " (SELECT vr.action FROM verdict_reviews vr "
+            "  WHERE vr.investigation_id = alert_investigations.id "
+            "  ORDER BY vr.created_at DESC LIMIT 1) AS review_status "
+            f"FROM alert_investigations{clause} "
             "ORDER BY created_at DESC LIMIT %s OFFSET %s",
             [*params, limit, offset],
         )
         return cur.fetchall(), total
+
+
+# --- overview aggregates (read-only, global) --------------------------------
+# These back the Overview landing page. Each is a small aggregate over the
+# write-once alert_investigations table (severity_label / triage_action are
+# already indexed-friendly filters used by the queue), computed globally rather
+# than per visible page.
+def summary_counts() -> dict[str, int]:
+    """Global at-a-glance totals for the Overview KPI row."""
+    with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT "
+            " count(*) AS total, "
+            " count(*) FILTER (WHERE lower(severity_label) IN ('high','critical')) AS high, "
+            " count(*) FILTER (WHERE triage_action = 'create_flagged') AS flagged, "
+            " count(*) FILTER (WHERE case_number IS NOT NULL) AS linked_cases, "
+            " count(*) FILTER (WHERE suppressed) AS suppressed "
+            "FROM alert_investigations"
+        )
+        row = cur.fetchone()
+    # count(*) FILTER returns None only on an empty table for the filtered ones
+    return {k: int(v or 0) for k, v in row.items()}
+
+
+# Fixed ordering so the severity-mix bar always renders low→critical left-to-right.
+_SEVERITY_ORDER = ("critical", "high", "medium", "low", "info")
+
+
+def severity_distribution() -> list[dict[str, Any]]:
+    """Counts grouped by severity_label, returned in a stable severity order for
+    the Overview mix bar. Unknown/empty labels are folded into 'info'."""
+    with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT lower(coalesce(nullif(severity_label, ''), 'info')) AS label, "
+            "count(*) AS n FROM alert_investigations GROUP BY 1"
+        )
+        found = {r["label"]: int(r["n"]) for r in cur.fetchall()}
+    # keep known labels in order; append any unexpected labels after
+    ordered = [{"label": s, "n": found.pop(s)} for s in _SEVERITY_ORDER if s in found]
+    ordered.extend({"label": k, "n": v} for k, v in found.items())
+    return ordered
+
+
+def agent_accuracy() -> dict[str, Any]:
+    """How well the agent tracks analyst judgement (the learning-loop scorecard):
+    verdict agreement (confirm vs override), triage feedback, review coverage, and
+    the attack types analysts most often correct. Read-only aggregate."""
+    with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("SELECT action, count(*) AS n FROM verdict_reviews GROUP BY action")
+        by_action = {r["action"]: r["n"] for r in cur.fetchall()}
+        confirms = int(by_action.get("confirm", 0))
+        overrides = int(by_action.get("override", 0))
+        total_reviews = confirms + overrides
+
+        cur.execute("SELECT rating, count(*) AS n FROM triage_feedback GROUP BY rating")
+        by_rating = {r["rating"]: r["n"] for r in cur.fetchall()}
+        tri_correct = int(by_rating.get("correct", 0))
+        tri_incorrect = int(by_rating.get("incorrect", 0))
+
+        cur.execute("SELECT count(DISTINCT investigation_id) AS n FROM verdict_reviews")
+        reviewed = int(cur.fetchone()["n"])
+        cur.execute("SELECT count(*) AS n FROM alert_investigations")
+        total_inv = int(cur.fetchone()["n"])
+
+        cur.execute(
+            "SELECT ai.attack_type AS attack_type, count(*) AS n "
+            "FROM verdict_reviews vr JOIN alert_investigations ai ON ai.id = vr.investigation_id "
+            "WHERE vr.action = 'override' GROUP BY ai.attack_type ORDER BY n DESC LIMIT 5"
+        )
+        top_corrected = cur.fetchall()
+
+        cur.execute("SELECT count(*) AS n FROM soc_memory_vectors WHERE (analysis->>'human_reviewed') = 'true'")
+        learned = int(cur.fetchone()["n"])
+
+    agreement_pct = round(confirms / total_reviews * 100) if total_reviews else None
+    tri_total = tri_correct + tri_incorrect
+    triage_pct = round(tri_correct / tri_total * 100) if tri_total else None
+    return {
+        "confirms": confirms, "overrides": overrides, "total_reviews": total_reviews,
+        "agreement_pct": agreement_pct,
+        "triage_correct": tri_correct, "triage_incorrect": tri_incorrect, "triage_pct": triage_pct,
+        "reviewed": reviewed, "total_investigations": total_inv,
+        "coverage_pct": round(reviewed / total_inv * 100) if total_inv else 0,
+        "learned_memories": learned,
+        "top_corrected": top_corrected,
+    }
+
+
+def needs_attention(limit: int = 8) -> list[dict[str, Any]]:
+    """High/critical OR flagged investigations that no analyst has reviewed yet
+    (no verdict_reviews row). Most severe, then most recent, first — the
+    'what needs me now' list on the Overview."""
+    with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            f"SELECT {_QUEUE_COLS} FROM alert_investigations ai "
+            "WHERE (lower(ai.severity_label) IN ('high','critical') "
+            "       OR ai.triage_action = 'create_flagged') "
+            "AND NOT EXISTS (SELECT 1 FROM verdict_reviews vr "
+            "                WHERE vr.investigation_id = ai.id) "
+            "ORDER BY ai.severity_score DESC NULLS LAST, ai.created_at DESC "
+            "LIMIT %s",
+            (limit,),
+        )
+        return cur.fetchall()
 
 
 def get_investigation(inv_id: int):
@@ -283,3 +405,93 @@ def list_chat(thread_key: str) -> list[dict[str, Any]]:
             (thread_key,),
         )
         return cur.fetchall()
+
+
+# --- conversations (multi-chat) ---------------------------------------------
+# Named, isolated chats layered on top of console_chat.thread_key. Each chat is
+# its own thread with its own history; the shared SOC alert memory stays global.
+# Every read/mutate is scoped to owner_username so an analyst can only reach
+# their own conversations (the thread_key is NEVER trusted from the client).
+def create_conversation(owner_username: str, title: str = "New chat") -> dict[str, Any]:
+    """Mint a fresh thread_key and its conversation row. Returns the new row."""
+    thread_key = f"{owner_username}:{secrets.token_hex(8)}"
+    with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "INSERT INTO console_conversations (thread_key, owner_username, title) "
+            "VALUES (%s, %s, %s) RETURNING id, thread_key, owner_username, title, created_at, updated_at",
+            (thread_key, owner_username, title),
+        )
+        return cur.fetchone()
+
+
+def list_conversations(owner_username: str) -> list[dict[str, Any]]:
+    """An analyst's conversations, most-recent first, with message counts."""
+    with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT c.id, c.thread_key, c.title, c.created_at, c.updated_at, "
+            "  (SELECT count(*) FROM console_chat m WHERE m.thread_key = c.thread_key) AS message_count "
+            "FROM console_conversations c WHERE c.owner_username = %s "
+            "ORDER BY c.updated_at DESC, c.id DESC",
+            (owner_username,),
+        )
+        return cur.fetchall()
+
+
+def get_conversation(conversation_id: int, owner_username: str) -> Optional[dict[str, Any]]:
+    """Fetch one conversation IFF it belongs to this analyst (authorization)."""
+    with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT id, thread_key, owner_username, title, created_at, updated_at "
+            "FROM console_conversations WHERE id = %s AND owner_username = %s",
+            (conversation_id, owner_username),
+        )
+        return cur.fetchone()
+
+
+def most_recent_conversation(owner_username: str) -> Optional[dict[str, Any]]:
+    """The analyst's most-recently-active conversation (drives the dock)."""
+    with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT id, thread_key, owner_username, title, created_at, updated_at "
+            "FROM console_conversations WHERE owner_username = %s "
+            "ORDER BY updated_at DESC, id DESC LIMIT 1",
+            (owner_username,),
+        )
+        return cur.fetchone()
+
+
+def rename_conversation(conversation_id: int, owner_username: str, title: str) -> bool:
+    """Set a conversation's title (owner-scoped). Returns True if a row changed."""
+    with get_pool().connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE console_conversations SET title = %s "
+            "WHERE id = %s AND owner_username = %s",
+            (title, conversation_id, owner_username),
+        )
+        return cur.rowcount > 0
+
+
+def touch_conversation(conversation_id: int) -> None:
+    """Bump updated_at so the conversation floats to the top after a new message."""
+    with get_pool().connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE console_conversations SET updated_at = now() WHERE id = %s",
+            (conversation_id,),
+        )
+
+
+def delete_conversation(conversation_id: int, owner_username: str) -> bool:
+    """Delete a conversation and its messages (owner-scoped, one transaction).
+    console_chat allows DELETE (only UPDATE is trigger-blocked)."""
+    with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT thread_key FROM console_conversations "
+            "WHERE id = %s AND owner_username = %s",
+            (conversation_id, owner_username),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return False
+        cur.execute("DELETE FROM console_chat WHERE thread_key = %s", (row["thread_key"],))
+        cur.execute("DELETE FROM console_conversations WHERE id = %s", (conversation_id,))
+        return True

@@ -1,0 +1,39 @@
+<div id="assistant-backdrop" class="assistant-backdrop" hidden></div>
+<aside id="assistant-dock" class="assistant-dock" aria-hidden="true" aria-label="Assistant">
+  <div class="dock-head">
+    <h2>Assistant</h2>
+    <div class="dock-head-actions">
+      <button type="button" class="secondary chip" id="dock-new-chat"
+              hx-post="/console/conversations" hx-target="#chat-log" hx-swap="outerHTML"
+              title="Start a new chat">+ new chat</button>
+      <a class="chip" href="/console/agent" title="Open full agent page">↗ full page</a>
+      <button type="button" class="icon-btn" id="assistant-close" aria-label="Close assistant">✕</button>
+    </div>
+  </div>
+  <p class="muted note">Most-recent chat. Ask about any case by number, compare cases, pivot on an
+    indicator, or query the logs. Manage all chats on the <a href="/console/agent">full page</a>.</p>
+
+  <div id="chat-log" class="chat-log"
+       hx-get="/console/assistant" hx-trigger="dockopen once" hx-swap="outerHTML">
+    <p class="muted chat-empty">Open to load your assistant thread…</p>
+  </div>
+
+  <div class="chat-prompts">
+    <button type="button" class="secondary chip" data-fill-prompt="Summarize the latest high-severity alerts and note any overlaps.">brief overview</button>
+    <button type="button" class="secondary chip" data-fill-prompt="Compare the source IPs and case numbers for the latest flagged alerts.">compare cases</button>
+    <button type="button" class="secondary chip" data-fill-prompt="Find the most recent case linked to the same host and summarize it.">host pivot</button>
+  </div>
+
+  <form class="chat-form"
+        hx-post="/console/chat"
+        hx-target="#chat-log" hx-swap="beforeend"
+        hx-vals='js:{conversation_id: document.getElementById("chat-log")?.dataset.conversationId || ""}'
+        hx-on::after-request="if(event.detail.successful){this.reset();var e=document.getElementById('chat-empty');if(e)e.remove();}">
+    <textarea name="message" rows="2" required
+      placeholder="Ask the assistant… (Enter to send, Shift+Enter for a newline)"></textarea>
+    <button type="submit">Send</button>
+  </form>
+  <p class="muted note">The assistant may take audited actions (verdict, triage feedback, case
+    close / severity / comment) on a case you name; each is attributed to
+    {{ analyst.username }} and written to the audit log.</p>
+</aside>

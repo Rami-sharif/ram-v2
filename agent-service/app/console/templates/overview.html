@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+{% block title %}Overview · RAM v2{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div class="readout">
+    <span>workspace <b>{{ summary.total }} investigations</b></span>
+    <span>unreviewed high-signal <b>{{ attention | length }}</b></span>
+    <span>linked cases <b>{{ summary.linked_cases }}</b></span>
+  </div>
+  <h1>Overview</h1>
+  <p class="muted">At-a-glance posture across every recorded investigation. Start with what needs you now, then move into the queue.</p>
+</div>
+
+<section class="summary-grid" aria-label="At a glance">
+  <a class="summary-card" href="/console/queue">
+    <span class="summary-label">Open queue</span>
+    <strong>{{ summary.total }}</strong>
+    <span class="muted">total investigations</span>
+  </a>
+  <a class="summary-card" href="/console/queue?severity=high">
+    <span class="summary-label">High / critical</span>
+    <strong>{{ summary.high }}</strong>
+    <span class="muted">requires fast attention</span>
+  </a>
+  <a class="summary-card" href="/console/queue?action=create_flagged">
+    <span class="summary-label">Flagged for review</span>
+    <strong>{{ summary.flagged }}</strong>
+    <span class="muted">escalated by triage</span>
+  </a>
+  <a class="summary-card" href="/console/queue?action=suppress_duplicate">
+    <span class="summary-label">Suppressed dupes</span>
+    <strong>{{ summary.suppressed }}</strong>
+    <span class="muted">deduplicated repeats</span>
+  </a>
+</section>
+
+<h2>Agent performance <span class="muted note">how well the agent tracks your judgement (the learning loop)</span></h2>
+<section class="summary-grid" aria-label="Agent performance">
+  <div class="summary-card">
+    <span class="summary-label">Verdict agreement</span>
+    <strong>{% if accuracy.agreement_pct is not none %}{{ accuracy.agreement_pct }}%{% else %}—{% endif %}</strong>
+    <span class="muted">{{ accuracy.confirms }} confirmed · {{ accuracy.overrides }} overridden</span>
+  </div>
+  <div class="summary-card">
+    <span class="summary-label">Triage accuracy</span>
+    <strong>{% if accuracy.triage_pct is not none %}{{ accuracy.triage_pct }}%{% else %}—{% endif %}</strong>
+    <span class="muted">{{ accuracy.triage_correct }} correct · {{ accuracy.triage_incorrect }} incorrect</span>
+  </div>
+  <div class="summary-card">
+    <span class="summary-label">Review coverage</span>
+    <strong>{{ accuracy.coverage_pct }}%</strong>
+    <span class="muted">{{ accuracy.reviewed }} of {{ accuracy.total_investigations }} reviewed</span>
+  </div>
+  <div class="summary-card">
+    <span class="summary-label">Learned corrections</span>
+    <strong>{{ accuracy.learned_memories }}</strong>
+    <span class="muted">memories carrying your ground truth</span>
+  </div>
+</section>
+{% if accuracy.top_corrected %}
+<p class="muted note" style="margin:-0.5rem 0 1.5rem">Most-corrected attack types:
+  {% for t in accuracy.top_corrected %}<span class="tag">{{ t.attack_type or 'unclassified' }} ×{{ t.n }}</span> {% endfor %}
+</p>
+{% endif %}
+
+<div class="detail-grid">
+  <section class="card">
+    <div class="panel-head">
+      <h2>Needs attention</h2>
+      <span class="muted note">high / critical or flagged, not yet reviewed</span>
+    </div>
+    {% if attention %}
+    <ul class="signal-list">
+      {% for r in attention %}
+      <li class="signal-row sev-row-{{ r.severity_label }}">
+        <a class="signal-main" href="/console/investigations/{{ r.id }}">
+          <span class="sev sev-{{ r.severity_label }}">{{ r.severity_label }}</span>
+          <span class="signal-title">{{ r.attack_type or 'unclassified' }}</span>
+          <span class="muted mono">{{ r.agent_name or '—' }}</span>
+        </a>
+        <span class="signal-meta muted">
+          {% if r.case_number %}#{{ r.case_number }} · {% endif %}{{ r.created_at.strftime('%m-%d %H:%M') }}
+        </span>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="muted">Nothing outstanding — every high-signal alert has been reviewed.</p>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <div class="panel-head">
+      <h2>Severity mix</h2>
+      <span class="muted note">{{ summary.total }} total</span>
+    </div>
+    {% if distribution %}
+    <div class="sevbar" role="img" aria-label="severity distribution">
+      {% for d in distribution %}
+      <span class="sevbar-seg sevseg-{{ d.label }}" style="width:{{ (d.n / dist_total * 100) | round(2) }}%"
+            title="{{ d.label }}: {{ d.n }}"></span>
+      {% endfor %}
+    </div>
+    <ul class="sevbar-legend">
+      {% for d in distribution %}
+      <li><span class="sev sev-{{ d.label }}">{{ d.label }}</span> <strong class="mono">{{ d.n }}</strong></li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="muted">No investigations recorded yet.</p>
+    {% endif %}
+
+    <h3>Recent activity</h3>
+    {% if recent %}
+    <ul class="signal-list compact">
+      {% for r in recent %}
+      <li class="signal-row sev-row-{{ r.severity_label }}">
+        <a class="signal-main" href="/console/investigations/{{ r.id }}">
+          <span class="sev sev-{{ r.severity_label }}">{{ r.severity_label }}</span>
+          <span class="signal-title">{{ r.attack_type or 'unclassified' }}</span>
+        </a>
+        <span class="signal-meta muted">{{ r.created_at.strftime('%m-%d %H:%M') }}</span>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="muted">No recent activity.</p>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}

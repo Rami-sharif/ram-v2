@@ -1,16 +1,31 @@
 {% extends "base.html" %}
 {% block title %}Memory · RAM v2{% endblock %}
 {% block content %}
-<h1>Memory store</h1>
+<div class="page-head">
+  <h1>Agent knowledge</h1>
+  <p class="muted">What the agent has learned from past alerts. Rows marked
+    <span class="tag review-corrected">✎ learned</span> carry your reviewed ground truth and
+    steer future investigations of similar alerts.</p>
+</div>
 
-<form class="filters" method="get" action="/console/memory">
-  <input type="text" name="q" value="{{ q }}" placeholder="Semantic search (embeds query)">
-  <input type="text" name="agent_name" value="{{ agent_name }}" placeholder="host">
-  <input type="text" name="source_ip" value="{{ source_ip }}" placeholder="source ip">
-  <input type="text" name="rule_id" value="{{ rule_id }}" placeholder="rule id">
-  <button type="submit">Search</button>
-  <a class="muted" href="/console/memory">reset</a>
-</form>
+<div class="filters-bar">
+  <form class="filters" method="get" action="/console/memory">
+    <input type="text" name="q" value="{{ q }}" placeholder="Semantic search (embeds query)">
+    <input type="text" name="agent_name" value="{{ agent_name }}" placeholder="host">
+    <input type="text" name="source_ip" value="{{ source_ip }}" placeholder="source ip">
+    <input type="text" name="rule_id" value="{{ rule_id }}" placeholder="rule id">
+    {% if reviewed %}<input type="hidden" name="reviewed" value="1">{% endif %}
+    <button type="submit">Search</button>
+    <a class="muted" href="/console/memory">reset</a>
+  </form>
+  <div class="quick-filters">
+    {% if reviewed %}
+      <a class="chip chip-on" href="/console/memory?{{ {'q': q, 'agent_name': agent_name, 'source_ip': source_ip, 'rule_id': rule_id} | urlencode }}">✎ analyst-reviewed only</a>
+    {% else %}
+      <a class="chip" href="/console/memory?{{ {'q': q, 'agent_name': agent_name, 'source_ip': source_ip, 'rule_id': rule_id, 'reviewed': '1'} | urlencode }}">show analyst-reviewed only</a>
+    {% endif %}
+  </div>
+</div>
 {% if q %}<p class="muted">Semantic search results (nearest first).</p>{% endif %}
 
 <table class="responsive">
@@ -26,7 +41,8 @@
       <td data-label="Host">{{ m.agent_name or '—' }}</td>
       <td data-label="Source IP" class="mono">{% if m.source_ip %}<span class="copyable" data-copy="{{ m.source_ip }}" title="click to copy">{{ m.source_ip }}</span>{% else %}—{% endif %}</td>
       <td data-label="Rule" class="mono">{{ m.rule_id or '—' }}</td>
-      <td data-label="Severity">{% if m.analysis %}<span class="sev sev-{{ m.analysis.severity_label }}">{{ m.analysis.severity_label }}</span>{% if m.analysis.severity_score is not none %} <span class="muted">{{ m.analysis.severity_score }}</span>{% endif %}{% else %}—{% endif %}</td>
+      <td data-label="Severity">{% if m.analysis %}<span class="sev sev-{{ m.analysis.severity_label }}">{{ m.analysis.severity_label }}</span>{% if m.analysis.severity_score is not none %} <span class="muted">{{ m.analysis.severity_score }}</span>{% endif %}{% else %}—{% endif %}
+        {% if m.analysis and m.analysis.human_reviewed %}<span class="tag {% if m.analysis.human_action == 'override' %}review-corrected">✎ learned{% else %}review-confirmed">✓ confirmed{% endif %}</span>{% endif %}</td>
       {% if q %}<td data-label="Sim" class="muted">{{ '%.3f'|format(m.similarity) if m.similarity is not none else '—' }}</td>{% endif %}
       <td data-label="Identity" class="mono snippet">{{ (m.alert_text or '')[:90] }}{% if (m.alert_text or '')|length > 90 %}…{% endif %}</td>
       <td data-label=""><a href="/console/memory/{{ m.id }}">open</a></td>

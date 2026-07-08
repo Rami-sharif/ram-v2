@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Investigation #{{ inv.id }} · RAM v2{% endblock %}
 {% block content %}
-<p><a href="/console/">← Triage queue</a></p>
+<p><a href="/console/queue">← Triage queue</a></p>
 <div class="page-head">
   <div class="readout">
     <span>case <b>#{{ inv.case_number or inv.id }}</b></span>
@@ -34,10 +34,10 @@
       <h2>Quick actions</h2>
     </div>
     <div class="action-stack">
-      <a class="action-tile" href="/console/">Jump to queue</a>
+      <a class="action-tile" href="/console/queue">Jump to queue</a>
       {% if case_url %}<a class="action-tile" href="{{ case_url }}" target="_blank" rel="noopener">Open TheHive case</a>{% endif %}
       <a class="action-tile" href="#analyst-actions">Review analyst actions</a>
-      <a class="action-tile" href="#assistant">Ask assistant about this case</a>
+      <button type="button" class="action-tile" data-open-assistant>Ask assistant about this case</button>
     </div>
   </section>
 </div>
@@ -157,10 +157,6 @@
     {% endif %}
   </div>
 </section>
-
-<p class="muted note" id="assistant">💬 Ask the assistant about this case (or any other) from the
-  <a href="/console/">queue dashboard chat</a> — e.g. “what is the source IP for case
-  {{ inv.case_number or inv.id }}?”</p>
 
 <h2>Analyst input history <span class="muted note">(layered on top of the immutable agent output)</span></h2>
 <section class="card">

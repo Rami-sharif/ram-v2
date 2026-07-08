@@ -1,0 +1,10 @@
+{# The scroll container + the active conversation id the chat form posts back to.
+   Swapped via outerHTML so switching/creating a chat updates data-conversation-id. #}
+<div id="chat-log" class="chat-log" data-conversation-id="{{ conversation.id }}">
+  {% if messages %}
+    {% include "_chat_messages.html" %}
+  {% else %}
+    <p class="muted chat-empty" id="chat-empty">No messages yet. Ask about any recorded case,
+      check whether an IP or hash appeared elsewhere, or request an audited action on a case.</p>
+  {% endif %}
+</div>

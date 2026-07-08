@@ -108,6 +108,7 @@ def process_alert(payload: dict[str, Any]) -> WebhookResponse:
             suppressed=decision.suppressed if decision else None,
             case_id=case_info.get("_id"),
             case_number=case_info.get("number"),
+            memory_id=memory_id,
         )
     except Exception:  # noqa: BLE001 - output-recording must never break ingestion
         # Recording failure must NEVER break ingestion (memory + TheHive already

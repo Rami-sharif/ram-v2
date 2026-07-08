@@ -55,47 +55,62 @@ def _resolve_retrieved(retrieved_ids) -> list[dict]:
     return out
 
 
-def _queue_summary(rows: list[dict]) -> dict[str, int]:
-    high = flagged = linked_cases = 0
-    for row in rows:
-        severity = (row.get("severity_label") or "").lower()
-        if severity in {"high", "critical"}:
-            high += 1
-        if (row.get("triage_action") or "").lower() == "create_flagged":
-            flagged += 1
-        if row.get("case_number"):
-            linked_cases += 1
-    return {"high": high, "flagged": flagged, "linked_cases": linked_cases}
+# Actions hidden from the queue's default "actionable only" view.
+_RESOLVED_ACTIONS = ("auto_close",)
 
 
 @protected.get("/", response_class=HTMLResponse)
+def overview(request: Request, analyst: dict = Depends(require_analyst)):
+    """Landing dashboard: global at-a-glance counts, severity mix, and the
+    'needs me now' list. Drill-downs link into the queue with a matching filter."""
+    summary = store.summary_counts()
+    distribution = store.severity_distribution()
+    dist_total = sum(d["n"] for d in distribution) or 1  # avoid /0 for bar widths
+    attention = store.needs_attention(limit=8)
+    recent, _ = store.list_investigations(limit=8, offset=0)
+    accuracy = store.agent_accuracy()
+    for r in (*attention, *recent):
+        r["case_url"] = _case_url(r.get("case_id"))
+    return templates.TemplateResponse(request, "overview.html", {
+        "analyst": analyst, "nav": "overview", "summary": summary,
+        "distribution": distribution, "dist_total": dist_total,
+        "attention": attention, "recent": recent, "accuracy": accuracy,
+        "msg": request.query_params.get("msg"), "err": request.query_params.get("err"),
+    })
+
+
+@protected.get("/queue", response_class=HTMLResponse)
 def queue(
     request: Request,
     analyst: dict = Depends(require_analyst),
     severity: Optional[str] = Query(None),
     action: Optional[str] = Query(None),
     q: Optional[str] = Query(None),
+    show: Optional[str] = Query(None),  # "all" includes resolved (auto_close)
     page: int = Query(1, ge=1),
 ):
     severity = severity or None
     action = action or None
     search = (q or "").strip() or None
+    show_all = show == "all"
+    # Default view hides auto-closed items; an explicit action filter or show=all
+    # overrides. exclude_actions is ignored by the store when `action` is set.
+    exclude = () if (show_all or action) else _RESOLVED_ACTIONS
     offset = (page - 1) * PAGE_SIZE
     rows, total = store.list_investigations(
         severity_label=severity, triage_action=action, search=search,
-        limit=PAGE_SIZE, offset=offset,
+        exclude_actions=exclude, limit=PAGE_SIZE, offset=offset,
     )
     for r in rows:
         r["case_url"] = _case_url(r.get("case_id"))
     total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
-    chat = store.list_chat(analyst["username"])  # one ongoing thread per analyst
-    summary = _queue_summary(rows)
     return templates.TemplateResponse(request, "queue.html", {
-        "analyst": analyst, "rows": rows, "total": total,
+        "analyst": analyst, "nav": "queue", "rows": rows, "total": total,
         "page": page, "total_pages": total_pages,
         "severity": severity or "", "action": action or "", "q": search or "",
+        "show_all": show_all,
         "severity_labels": SEVERITY_LABELS, "triage_actions": TRIAGE_ACTIONS,
-        "chat": chat, "summary": summary, "msg": request.query_params.get("msg"),
+        "msg": request.query_params.get("msg"),
         "err": request.query_params.get("err"),
     })
 
@@ -113,7 +128,7 @@ def investigation_detail(
     rec["case_url"] = _case_url(rec["inv"].get("case_id"))
     retrieved = _resolve_retrieved(rec["inv"].get("retrieved_ids"))
     return templates.TemplateResponse(request, "investigation.html", {
-        "analyst": analyst, "msg": request.query_params.get("msg"),
+        "analyst": analyst, "nav": "queue", "msg": request.query_params.get("msg"),
         "err": request.query_params.get("err"), "retrieved": retrieved,
         "severity_labels": SEVERITY_LABELS, "close_statuses": thehive.CLOSED_STATUSES,
         **rec,
@@ -126,7 +141,99 @@ def _back(inv_id: int, *, msg: str = None, err: str = None) -> RedirectResponse:
 
 
 # --- dashboard-level analyst chat -------------------------------------------
-# One ongoing thread per analyst (keyed by username), lives on the queue page.
+# The assistant is a GLOBAL slide-in dock (rendered from base.html on every
+# page). Its thread is lazy-loaded via this GET so no page pays for the history
+# until the analyst opens the dock. One ongoing thread per analyst (username).
+_CHAT_EMPTY_HTML = (
+    '<p class="muted chat-empty" id="chat-empty">No messages yet. Ask about any '
+    'recorded case, check whether an IP or hash appeared elsewhere, or request '
+    'an audited action on a case.</p>'
+)
+
+
+def _ensure_conversation(analyst: dict) -> dict:
+    """The analyst's most-recent conversation, creating a first one if none exist."""
+    return (store.most_recent_conversation(analyst["username"])
+            or store.create_conversation(analyst["username"]))
+
+
+def _resolve_conversation(analyst: dict, conversation_id) -> dict:
+    """Resolve which conversation a chat turn targets. An explicit id must belong
+    to the analyst (authorization); otherwise fall back to their most-recent
+    (the dock posts with no id and targets the most-recent chat)."""
+    if conversation_id:
+        try:
+            convo = store.get_conversation(int(conversation_id), analyst["username"])
+        except (TypeError, ValueError):
+            convo = None
+        if convo is not None:
+            return convo
+    return _ensure_conversation(analyst)
+
+
+# Dock thread (lazy-loaded): render the analyst's most-recent conversation, with
+# its id on the wrapper so the dock's form posts back to the right chat.
+@protected.get("/assistant", response_class=HTMLResponse)
+def assistant_thread(request: Request, analyst: dict = Depends(require_analyst)):
+    convo = _ensure_conversation(analyst)
+    chat = store.list_chat(convo["thread_key"])
+    return templates.TemplateResponse(request, "_chat_log.html", {
+        "messages": chat, "conversation": convo,
+    })
+
+
+# Full-page assistant with multi-conversation management. `c` selects a
+# conversation (must be owned); otherwise the most-recent is shown. The dock is
+# suppressed here (hide_dock) so #chat-log stays unique and console.js drives it.
+@protected.get("/agent", response_class=HTMLResponse)
+def agent_page(request: Request, analyst: dict = Depends(require_analyst),
+               c: Optional[int] = Query(None)):
+    conversations = store.list_conversations(analyst["username"])
+    active = None
+    if c is not None:
+        active = store.get_conversation(c, analyst["username"])
+    if active is None:
+        active = _ensure_conversation(analyst)
+        if not conversations:  # first-ever conversation just created
+            conversations = store.list_conversations(analyst["username"])
+    chat = store.list_chat(active["thread_key"])
+    return templates.TemplateResponse(request, "agent.html", {
+        "analyst": analyst, "nav": "agent", "hide_dock": True, "chat": chat,
+        "conversations": conversations, "active": active,
+        "msg": request.query_params.get("msg"), "err": request.query_params.get("err"),
+    })
+
+
+# --- conversation management (create / rename / delete) ----------------------
+@protected.post("/conversations")
+def create_conversation(request: Request, analyst: dict = Depends(require_analyst)):
+    convo = store.create_conversation(analyst["username"])
+    if request.headers.get("HX-Request"):  # dock: swap in the fresh empty thread
+        return templates.TemplateResponse(request, "_chat_log.html", {
+            "messages": [], "conversation": convo,
+        })
+    return RedirectResponse(f"/console/agent?c={convo['id']}", status_code=303)
+
+
+@protected.post("/conversations/{conversation_id}/rename")
+def rename_conversation(
+    request: Request, conversation_id: int, analyst: dict = Depends(require_analyst),
+    title: str = Form(...),
+):
+    title = title.strip()[:120] or "Untitled chat"
+    store.rename_conversation(conversation_id, analyst["username"], title)
+    return RedirectResponse(f"/console/agent?c={conversation_id}", status_code=303)
+
+
+@protected.post("/conversations/{conversation_id}/delete")
+def delete_conversation(
+    request: Request, conversation_id: int, analyst: dict = Depends(require_analyst),
+):
+    store.delete_conversation(conversation_id, analyst["username"])
+    return RedirectResponse("/console/agent", status_code=303)
+
+
+# One ongoing thread per analyst (keyed by username), driven from the dock.
 # The analyst asks freely; the assistant looks up any case it needs by number and
 # may take audited actions on a case it just looked up. Persists the conversation
 # (write-once per message); any action the assistant takes is separately audited
@@ -135,15 +242,20 @@ def _back(inv_id: int, *, msg: str = None, err: str = None) -> RedirectResponse:
 @protected.post("/chat")
 def post_chat(
     request: Request, analyst: dict = Depends(require_analyst), message: str = Form(...),
+    conversation_id: Optional[str] = Form(None),
 ):
     message = message.strip()
-    thread_key = analyst["username"]
     if not message:
         if request.headers.get("HX-Request"):
             return HTMLResponse("", status_code=204)
-        return RedirectResponse("/console/?err=empty+message", status_code=303)
+        return RedirectResponse("/console/queue?err=empty+message", status_code=303)
 
-    prior = store.list_chat(thread_key)  # history BEFORE this turn
+    # Resolve the target conversation (owner-checked); the dock omits the id and
+    # targets the most-recent chat. History is that conversation's ONLY — chats
+    # are isolated; the shared SOC alert memory stays available via the tools.
+    convo = _resolve_conversation(analyst, conversation_id)
+    thread_key = convo["thread_key"]
+    prior = store.list_chat(thread_key)  # history BEFORE this turn (this chat only)
     store.add_chat_message(thread_key=thread_key, role="analyst",
                            actor=analyst["username"], message=message)
     try:
@@ -156,6 +268,10 @@ def post_chat(
         reply, tool_calls, referenced = f"(assistant error: {exc})", [], []
     store.add_chat_message(thread_key=thread_key, role="agent", actor="agent",
                            message=reply, tool_calls=tool_calls, referenced_case_ids=referenced)
+    # First analyst message titles a still-unnamed chat; bump recency either way.
+    if convo.get("title") in (None, "New chat"):
+        store.rename_conversation(convo["id"], analyst["username"], message[:48])
+    store.touch_conversation(convo["id"])
 
     if request.headers.get("HX-Request"):
         new_messages = [
@@ -166,7 +282,7 @@ def post_chat(
         ]
         return templates.TemplateResponse(request, "_chat_messages.html",
                                           {"messages": new_messages})
-    return RedirectResponse("/console/?msg=chat+updated", status_code=303)
+    return RedirectResponse("/console/queue?msg=chat+updated", status_code=303)
 
 
 # --- analyst actions on the verdict / triage decision -----------------------
@@ -198,6 +314,13 @@ def post_verdict(
         investigation_id=inv_id, actor_username=analyst["username"], action=action,
         override_payload=payload, reason=reason or None, before=before,
     )
+    # Learning loop: fold this verdict into the alert's memory row (best-effort;
+    # a memory failure must never fail the recorded verdict).
+    try:
+        memory.record_human_verdict(inv, action=action, override_payload=payload,
+                                    actor=analyst["username"])
+    except Exception:  # noqa: BLE001
+        logger.exception("Learning-loop memory update failed (verdict recorded) inv=%s", inv_id)
     return _back(inv_id, msg=f"verdict+{action}+recorded")
 
 
@@ -321,26 +444,30 @@ def memory_list(
     request: Request, analyst: dict = Depends(require_analyst),
     agent_name: Optional[str] = Query(None), source_ip: Optional[str] = Query(None),
     rule_id: Optional[str] = Query(None), q: Optional[str] = Query(None),
-    page: int = Query(1, ge=1),
+    reviewed: Optional[str] = Query(None), page: int = Query(1, ge=1),
 ):
     search = (q or "").strip() or None
+    reviewed_only = reviewed == "1"
     if search:
         rows = memory.search_memories(search, agent_name=agent_name or None, k=PAGE_SIZE)
+        if reviewed_only:
+            rows = [r for r in rows if (r.get("analysis") or {}).get("human_reviewed")]
         total, total_pages, page = len(rows), 1, 1
     else:
         offset = (page - 1) * PAGE_SIZE
         rows = memory.list_memories(
             agent_name=agent_name or None, source_ip=source_ip or None,
-            rule_id=rule_id or None, limit=PAGE_SIZE + 1, offset=offset,
+            rule_id=rule_id or None, reviewed_only=reviewed_only,
+            limit=PAGE_SIZE + 1, offset=offset,
         )
         has_next = len(rows) > PAGE_SIZE
         rows = rows[:PAGE_SIZE]
         total_pages = page + 1 if has_next else page
         total = None
     return templates.TemplateResponse(request, "memory_list.html", {
-        "analyst": analyst, "rows": rows, "page": page, "total_pages": total_pages,
+        "analyst": analyst, "nav": "memory", "rows": rows, "page": page, "total_pages": total_pages,
         "total": total, "q": search or "", "agent_name": agent_name or "",
-        "source_ip": source_ip or "", "rule_id": rule_id or "",
+        "source_ip": source_ip or "", "rule_id": rule_id or "", "reviewed": reviewed_only,
         "msg": request.query_params.get("msg"), "err": request.query_params.get("err"),
     })
 
@@ -353,7 +480,7 @@ def memory_detail(request: Request, mid: int, analyst: dict = Depends(require_an
             request, "not_found.html", {"analyst": analyst, "inv_id": f"memory {mid}"},
             status_code=404)
     return templates.TemplateResponse(request, "memory_detail.html", {
-        "analyst": analyst, "m": row,
+        "analyst": analyst, "nav": "memory", "m": row,
         "analysis_json": json.dumps(row.get("analysis") or {}, indent=2),
         "msg": request.query_params.get("msg"), "err": request.query_params.get("err"),
     })

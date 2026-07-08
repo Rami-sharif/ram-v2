@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Agent · RAM v2{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div class="readout">
+    <span>mode <b>interactive</b></span>
+    <span>identity <b>{{ analyst.username }}</b></span>
+    <span>chats <b>{{ conversations | length }}</b></span>
+  </div>
+  <h1>Agent</h1>
+  <p class="muted">Full-screen workspace for the investigation assistant. Each chat keeps its own
+    history; the shared alert memory is available to all of them. Ask about any case by number,
+    compare cases, pivot on an indicator, query the Wazuh logs, or request an audited action.</p>
+</div>
+
+<div class="agent-layout">
+  <aside class="convo-sidebar">
+    <form method="post" action="/console/conversations" class="convo-new">
+      <button type="submit">+ New chat</button>
+    </form>
+    <ul class="convo-list">
+      {% for c in conversations %}
+      <li class="convo-item{% if c.id == active.id %} active{% endif %}">
+        <a class="convo-open" href="/console/agent?c={{ c.id }}">
+          <span class="convo-title">{{ c.title }}</span>
+          <span class="convo-meta muted">{{ c.message_count }} msg · {{ c.updated_at.strftime('%m-%d %H:%M') }}</span>
+        </a>
+        <form method="post" action="/console/conversations/{{ c.id }}/delete" class="convo-del"
+              onsubmit="return confirm('Delete this chat and its history?')">
+          <button type="submit" class="icon-btn" title="Delete chat" aria-label="Delete chat">✕</button>
+        </form>
+      </li>
+      {% else %}
+      <li class="muted">No chats yet.</li>
+      {% endfor %}
+    </ul>
+  </aside>
+
+  <section class="card agent-page">
+    <div class="agent-active-head">
+      <form method="post" action="/console/conversations/{{ active.id }}/rename" class="rename-form">
+        <input type="text" name="title" value="{{ active.title }}" aria-label="Chat title" maxlength="120">
+        <button type="submit" class="secondary">rename</button>
+      </form>
+    </div>
+
+    {% with messages = chat, conversation = active %}{% include "_chat_log.html" %}{% endwith %}
+
+    <div class="chat-prompts">
+      <button type="button" class="secondary chip" data-fill-prompt="Summarize the latest high-severity alerts and note any overlaps.">brief overview</button>
+      <button type="button" class="secondary chip" data-fill-prompt="Compare the source IPs and case numbers for the latest flagged alerts.">compare cases</button>
+      <button type="button" class="secondary chip" data-fill-prompt="Find the most recent case linked to the same host and summarize it.">host pivot</button>
+      <button type="button" class="secondary chip" data-fill-prompt="Using the Wazuh logs, count alerts grouped by rule id over the last 7 days.">log counts</button>
+    </div>
+
+    <form class="chat-form"
+          hx-post="/console/chat"
+          hx-target="#chat-log" hx-swap="beforeend"
+          hx-vals='js:{conversation_id: document.getElementById("chat-log")?.dataset.conversationId || ""}'
+          hx-on::after-request="if(event.detail.successful){this.reset();var e=document.getElementById('chat-empty');if(e)e.remove();}">
+      <textarea name="message" rows="3" required
+        placeholder="Ask the assistant… (Enter to send, Shift+Enter for a newline)"></textarea>
+      <button type="submit">Send</button>
+    </form>
+    <p class="muted note">The assistant may take audited actions (verdict, triage feedback, case
+      close / severity / comment) on a case you name; each is attributed to
+      {{ analyst.username }} and written to the audit log.</p>
+  </section>
+</div>
+{% endblock %}
