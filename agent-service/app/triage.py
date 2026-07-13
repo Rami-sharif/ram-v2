@@ -38,6 +38,16 @@ def _norm_source_ip(alert: WazuhAlert) -> Optional[str]:
     return ip
 
 
+def dedup_key_for(agent_name: Optional[str], rule_id: Optional[str],
+                  source_ip: Optional[str]) -> Optional[str]:
+    """The dedup identity of an alert: agent|rule|source_ip. No source_ip means the
+    alert was never deduped, so it has no key. Shared with the console's case retry,
+    which backfills the dedup row this key points at."""
+    if not source_ip:
+        return None
+    return f"{agent_name or 'unknown'}|{rule_id or ''}|{source_ip}"
+
+
 def _branch(score: int) -> str:
     s = get_settings()
     if score >= s.triage_high_threshold:
@@ -101,12 +111,17 @@ def route_and_execute(
         _log(decision, alert, case)
         return decision, case
 
-    dedup_key = f"{alert.agent.name or 'unknown'}|{alert.rule.id or ''}|{source_ip}"
+    dedup_key = dedup_key_for(alert.agent.name, alert.rule.id, source_ip)
     return _dedup_and_execute(alert, analysis, enrichment, branch, flag, extra_tags,
                               dedup_key, source_ip)
 
 
 def _create(alert, analysis, enrichment, flag) -> Optional[dict[str, Any]]:
+    """Create the case for a case-creating branch. A failure returns {"error": ...}
+    rather than raising: the triage ACTION is unchanged (a high alert stays
+    create_flagged whether or not TheHive accepted the case), the analysis is
+    preserved, and the error is carried out to the investigation record so an
+    analyst can retry the case from the console."""
     if not get_settings().thehive_enabled:
         logger.info("TheHive disabled — case creation skipped")
         return None
@@ -114,7 +129,7 @@ def _create(alert, analysis, enrichment, flag) -> Optional[dict[str, Any]]:
     try:
         return thehive.create_case(alert, analysis, enrichment, flag=flag, extra_tags=extra_tags)
     except thehive.TheHiveError as exc:
-        logger.error("Case creation failed (analysis preserved): %s", exc)
+        logger.error("Case creation failed (analysis preserved, retryable from console): %s", exc)
         return {"error": str(exc)}
 
 
@@ -186,3 +201,85 @@ def _dedup_and_execute(alert, analysis, enrichment, branch, flag, extra_tags,
             )
             _log(decision, alert, case)
             return decision, case
+
+
+# --- console-driven retry of a failed case creation -------------------------
+# Replays the ORIGINAL triage intent for one investigation: same alert, same
+# analysis, same enrichment, same flag — only the moment differs. Nothing here
+# touches alert_investigations (still write-once); the caller records the result.
+_CASE_CREATING_ACTIONS = ("create_flagged", "create_open")
+
+
+def parent_case_for(inv: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """The case this alert's dedup GROUP belongs to, if there is one.
+
+    Dedup means "these alerts are one incident, tracked in one case". So an alert
+    with no case of its own — a suppressed duplicate, or a create_* alert whose own
+    creation failed — belongs to whatever case its dedup key points at, including a
+    case created later by a retry. Linking to it is always right and creating a
+    second case for the same key never is."""
+    key = dedup_key_for(inv.get("agent_name"), inv.get("rule_id"), inv.get("source_ip"))
+    if not key:
+        return None
+    with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT case_id, case_number FROM triage_dedup "
+            "WHERE dedup_key = %s AND case_id IS NOT NULL",
+            (key,),
+        )
+        return cur.fetchone()
+
+
+def can_retry_case(inv: dict[str, Any]) -> bool:
+    """True when this investigation MEANT to have a case, has none, and we can build
+    a faithful one from what was recorded. Only for alerts whose dedup group has no
+    case at all — when the group already has one, the alert must be LINKED to it
+    (parent_case_for) rather than given a second case. A suppressed duplicate can
+    reach this path: if the original case creation failed and was never retried,
+    nothing in the group has a case, and this alert is as good a place to create it
+    as any (the dedup row is backfilled, so the whole group then resolves to it)."""
+    return bool(
+        inv.get("triage_action") in _CASE_CREATING_ACTIONS + ("suppress_duplicate",)
+        and not inv.get("case_id")
+        and inv.get("alert_payload")
+    )
+
+
+def create_case_for_investigation(inv: dict[str, Any]) -> dict[str, Any]:
+    """Retry TheHive case creation for a recorded investigation. Returns the new
+    case ({"_id", "number", ...}); raises TheHiveError if TheHive still refuses."""
+    alert = WazuhAlert.model_validate(inv["alert_payload"])
+    analysis = AnalysisResult.model_validate(inv["analysis"])
+    # Escalation follows the original BRANCH, not the action, so a suppressed
+    # duplicate of a high alert still creates the flagged case triage intended.
+    flag = inv.get("triage_branch") == "high"
+    extra_tags = ["escalated"] if flag else ["needs-review"]
+    case = thehive.create_case(alert, analysis, inv.get("enrichment") or {},
+                               flag=flag, extra_tags=[*extra_tags, "case-retry"])
+    logger.info("TRIAGE case retry succeeded investigation=%s case=%s (#%s)",
+                inv.get("id"), case.get("_id"), case.get("number"))
+    _backfill_dedup(inv, case)
+    return case
+
+
+def _backfill_dedup(inv: dict[str, Any], case: dict[str, Any]) -> None:
+    """Point this alert's dedup row at the case we just created. Without this, the
+    dedup row left behind by the failed attempt still carries a NULL case_id, so
+    every repeat inside the window would be suppressed into a case that does not
+    exist. Best-effort: the case is already created, so a dedup failure must not
+    fail the retry."""
+    key = dedup_key_for(inv.get("agent_name"), inv.get("rule_id"), inv.get("source_ip"))
+    if not key:
+        return
+    try:
+        with get_pool().connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE triage_dedup SET case_id = %s, case_number = %s "
+                "WHERE dedup_key = %s AND case_id IS NULL",
+                (case.get("_id"), case.get("number"), key),
+            )
+            if cur.rowcount:
+                logger.info("TRIAGE dedup backfilled key=%s -> case #%s", key, case.get("number"))
+    except Exception:  # noqa: BLE001
+        logger.exception("Dedup backfill failed after case retry (case %s created)",
+                         case.get("number"))

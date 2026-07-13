@@ -6,12 +6,13 @@ All routes are session-authenticated; kept entirely separate from the webhook.
 """
 import json
 import logging
+import re
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from .. import agent, memory, thehive
+from .. import agent, memory, thehive, triage
 from ..config import get_settings
 from . import store
 from .auth import require_analyst
@@ -28,6 +29,7 @@ protected = APIRouter(prefix="/console", tags=["console"])
 PAGE_SIZE = 25
 SEVERITY_LABELS = ("low", "medium", "high", "critical")
 TRIAGE_ACTIONS = ("auto_close", "create_open", "create_flagged", "suppress_duplicate")
+_SAFE_QS = re.compile(r"[A-Za-z0-9_=&%.\-+]*")
 
 
 def _case_url(case_id: Optional[str]) -> Optional[str]:
@@ -127,12 +129,96 @@ def investigation_detail(
         )
     rec["case_url"] = _case_url(rec["inv"].get("case_id"))
     retrieved = _resolve_retrieved(rec["inv"].get("retrieved_ids"))
+    # `chat_context` anchors the assistant dock to THIS investigation: the dock's
+    # form posts the id, so "is this a real threat?" needs no case number.
+    # When the investigation has no case, offer the right recovery: link it to the
+    # case its dedup group already has, or (if the group has none) create one.
+    inv = rec["inv"]
+    parent_case = None if inv.get("case_id") else triage.parent_case_for(inv)
+    if parent_case:
+        parent_case = {**parent_case, "url": _case_url(parent_case["case_id"])}
     return templates.TemplateResponse(request, "investigation.html", {
         "analyst": analyst, "nav": "queue", "msg": request.query_params.get("msg"),
         "err": request.query_params.get("err"), "retrieved": retrieved,
         "severity_labels": SEVERITY_LABELS, "close_statuses": thehive.CLOSED_STATUSES,
+        "chat_context": _chat_context(inv),
+        "parent_case": parent_case,
+        "can_retry_case": parent_case is None and triage.can_retry_case(inv),
         **rec,
     })
+
+
+def _chat_context(inv: dict) -> dict:
+    """What the dock shows (and posts) when the analyst chats from an investigation."""
+    return {
+        "investigation_id": inv["id"],
+        "label": f"Investigation #{inv['id']}"
+                 + (f" · case #{inv['case_number']}" if inv.get("case_number") else ""),
+    }
+
+
+def _parse_ids(raw: list[str], *, cap: int = 200) -> list[int]:
+    """Ids arrive from checkbox form fields, so they are untrusted strings. Keep the
+    integers, drop duplicates, preserve order, and cap the batch — one click should
+    never be able to issue an unbounded delete."""
+    out: list[int] = []
+    for value in raw:
+        try:
+            n = int(value)
+        except (TypeError, ValueError):
+            continue
+        if n not in out:
+            out.append(n)
+    return out[:cap]
+
+
+@protected.post("/investigations/bulk-delete")
+def bulk_delete_investigations(
+    request: Request, analyst: dict = Depends(require_analyst),
+    ids: list[str] = Form(default=[]), back: str = Form(""),
+):
+    """Delete every selected investigation. Each one is audited individually (see
+    store.delete_investigations) — selecting 20 rows is 20 audit rows, not one."""
+    inv_ids = _parse_ids(ids)
+    if not inv_ids:
+        return _queue_back(back, err="select+at+least+one+alert")
+    deleted = store.delete_investigations(inv_ids, actor_username=analyst["username"])
+    if not deleted:
+        return _queue_back(back, err="nothing+deleted+-+those+alerts+are+already+gone")
+    return _queue_back(back, msg=f"deleted+{len(deleted)}+investigation(s)")
+
+
+def _queue_back(back: str, *, msg: str = None, err: str = None) -> RedirectResponse:
+    """Back to the queue view the analyst acted from (filters/page intact)."""
+    qs = back.lstrip("?") if _SAFE_QS.fullmatch(back.lstrip("?")) else ""
+    tail = f"msg={msg}" if msg else f"err={err}"
+    sep = "&" if qs else ""
+    return RedirectResponse(f"/console/queue?{qs}{sep}{tail}", status_code=303)
+
+
+@protected.post("/investigations/{inv_id}/delete")
+def delete_investigation(
+    request: Request, inv_id: int, analyst: dict = Depends(require_analyst),
+    back: str = Form(""),
+):
+    """Drop an alert from the triage queue. Audited FIRST (an audit failure raises
+    and nothing is deleted), then the record and its layered human input go."""
+    rec = store.get_investigation(inv_id)
+    if rec is None:
+        return RedirectResponse("/console/queue?err=investigation+not+found", status_code=303)
+    inv = rec["inv"]
+    store.write_audit(
+        analyst["username"], "investigation_delete", target_type="investigation",
+        target_id=str(inv_id),
+        before={"alert_id": inv.get("alert_id"), "agent_name": inv.get("agent_name"),
+                "source_ip": inv.get("source_ip"), "rule_id": inv.get("rule_id"),
+                "severity_label": inv.get("severity_label"),
+                "triage_action": inv.get("triage_action"), "case_number": inv.get("case_number")},
+        detail=f"deleted from triage queue ({len(rec['reviews'])} review(s), "
+               f"{len(rec['feedback'])} feedback row(s) removed with it)",
+    )
+    store.delete_investigation(inv_id)
+    return _queue_back(back, msg="investigation+deleted")
 
 
 def _back(inv_id: int, *, msg: str = None, err: str = None) -> RedirectResponse:
@@ -243,12 +329,25 @@ def delete_conversation(
 def post_chat(
     request: Request, analyst: dict = Depends(require_analyst), message: str = Form(...),
     conversation_id: Optional[str] = Form(None),
+    investigation_id: Optional[str] = Form(None),
 ):
     message = message.strip()
     if not message:
         if request.headers.get("HX-Request"):
             return HTMLResponse("", status_code=204)
         return RedirectResponse("/console/queue?err=empty+message", status_code=303)
+
+    # Chatting from an investigation page anchors the turn to that record, so the
+    # analyst can say "this alert" without naming a case number. The id comes from
+    # the page (not the model), and is only a starting point — the assistant still
+    # looks the case up through its audited tools before acting on it.
+    focus = None
+    if investigation_id:
+        try:
+            rec = store.get_investigation(int(investigation_id))
+        except (TypeError, ValueError):
+            rec = None
+        focus = rec["inv"] if rec else None
 
     # Resolve the target conversation (owner-checked); the dock omits the id and
     # targets the most-recent chat. History is that conversation's ONLY — chats
@@ -262,6 +361,7 @@ def post_chat(
         reply, tool_calls, referenced = agent.run_interactive(
             message, analyst["username"],
             history=[{"role": h["role"], "message": h["message"]} for h in prior],
+            focus_investigation=focus,
         )
     except Exception as exc:  # noqa: BLE001 - never lose the turn; record the failure
         logger.exception("Dashboard chat failed for analyst %s", thread_key)
@@ -350,6 +450,73 @@ def _require_case(inv_id: int):
     if rec is None:
         return None, None
     return rec, rec["inv"].get("case_id")
+
+
+@protected.post("/investigations/{inv_id}/case/link")
+def post_case_link(
+    request: Request, inv_id: int, analyst: dict = Depends(require_analyst),
+):
+    """Link an investigation to the case its dedup group already has. This is the
+    correct recovery for a suppressed duplicate (and for any alert of a group whose
+    case was created later): the group is ONE incident and must stay one case."""
+    rec = store.get_investigation(inv_id)
+    if rec is None:
+        return _back(inv_id, err="investigation+not+found")
+    inv = rec["inv"]
+    if inv.get("case_id"):
+        return _back(inv_id, err="case+already+linked")
+    parent = triage.parent_case_for(inv)
+    if not parent:
+        return _back(inv_id, err="no+case+exists+for+this+alert+group")
+    try:
+        store.link_case(
+            investigation_id=inv_id, case_id=parent["case_id"],
+            case_number=parent.get("case_number"), actor_username=analyst["username"],
+            action="investigation_case_link",
+            detail=f"linked to existing case #{parent.get('case_number')} "
+                   f"(the case this alert's dedup group belongs to)",
+            before={"case_id": None, "case_error": inv.get("case_error")},
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Linking investigation %s to case %s failed", inv_id, parent["case_id"])
+        return _back(inv_id, err="linking+the+case+failed")
+    return _back(inv_id, msg=f"linked+to+case+%23{parent.get('case_number')}")
+
+
+@protected.post("/investigations/{inv_id}/case/create")
+def post_case_create(
+    request: Request, inv_id: int, analyst: dict = Depends(require_analyst),
+):
+    """Retry the case creation that failed during triage. The agent's output is NOT
+    rewritten: on success the new case is recorded as an attributed link row (audited
+    in the same transaction), which every console view then resolves as the
+    investigation's case. On failure the analyst sees the TheHive error and can retry."""
+    rec = store.get_investigation(inv_id)
+    if rec is None:
+        return _back(inv_id, err="investigation+not+found")
+    inv = rec["inv"]
+    if inv.get("case_id"):
+        return _back(inv_id, err="case+already+linked")
+    if not triage.can_retry_case(inv):
+        # No stored alert payload (recorded before this feature) or not a case-creating
+        # alert — nothing faithful to replay, so refuse rather than invent a case.
+        return _back(inv_id, err="this+investigation+cannot+be+retried")
+    logger.info("THEHIVE_INTENT actor=%s action=thehive_create_case investigation=%s "
+                "original_error=%r", analyst["username"], inv_id, inv.get("case_error"))
+    try:
+        case = triage.create_case_for_investigation(inv)
+    except thehive.TheHiveError as exc:
+        logger.error("Case retry failed for investigation %s: %s", inv_id, exc)
+        return _back(inv_id, err="case+creation+failed+again")
+    try:
+        store.link_case(investigation_id=inv_id, case_id=case["_id"], case_number=case.get("number"),
+                        actor_username=analyst["username"],
+                        before={"case_id": None, "case_error": inv.get("case_error")})
+    except Exception:  # noqa: BLE001 - the case EXISTS now; never lose that fact silently
+        logger.exception("Case #%s created in TheHive for investigation %s but linking it "
+                         "failed (case_id=%s)", case.get("number"), inv_id, case.get("_id"))
+        return _back(inv_id, err="case+created+but+linking+failed+-+see+logs")
+    return _back(inv_id, msg=f"case+created+%23{case.get('number')}")
 
 
 @protected.post("/investigations/{inv_id}/case/close")
@@ -529,6 +696,39 @@ def memory_edit_identity(
                       after={"alert_text": alert_text}, detail="identity edit -> re-embed")
     memory.reembed_identity(mid, alert_text)  # locked rule: identity change re-embeds
     return _mem_back(mid, msg="identity+updated+reembedded")
+
+
+@protected.post("/memory/bulk-delete")
+def memory_bulk_delete(
+    request: Request, analyst: dict = Depends(require_analyst),
+    ids: list[str] = Form(default=[]), back: str = Form(""),
+):
+    """Delete every selected memory row. Each is audited BEFORE anything is removed —
+    if an audit write fails it raises and nothing is deleted, same rule as the single
+    delete. Deleting learned memory changes what the agent knows, so the audit row
+    keeps the identity text and analysis that were destroyed."""
+    mids = _parse_ids(ids)
+    if not mids:
+        return _memory_back(back, err="select+at+least+one+memory")
+    rows = [(mid, memory.get_memory(mid)) for mid in mids]
+    present = [(mid, row) for mid, row in rows if row is not None]
+    if not present:
+        return _memory_back(back, err="nothing+deleted+-+those+memories+are+already+gone")
+    for mid, row in present:
+        store.write_audit(
+            analyst["username"], "memory_delete", target_type="memory", target_id=str(mid),
+            before={"alert_text": row.get("alert_text"), "analysis": row.get("analysis")},
+            detail=f"bulk delete of {len(present)} memory row(s) from the memory browser",
+        )
+    deleted = memory.delete_memories([mid for mid, _ in present])
+    return _memory_back(back, msg=f"deleted+{len(deleted)}+memory+row(s)")
+
+
+def _memory_back(back: str, *, msg: str = None, err: str = None) -> RedirectResponse:
+    qs = back.lstrip("?") if _SAFE_QS.fullmatch(back.lstrip("?")) else ""
+    tail = f"msg={msg}" if msg else f"err={err}"
+    sep = "&" if qs else ""
+    return RedirectResponse(f"/console/memory?{qs}{sep}{tail}", status_code=303)
 
 
 @protected.post("/memory/{mid}/delete")

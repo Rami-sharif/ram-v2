@@ -336,3 +336,17 @@ def delete_memory(memory_id: int) -> bool:
     with get_pool().connection() as conn, conn.cursor() as cur:
         cur.execute("DELETE FROM soc_memory_vectors WHERE id = %s", (memory_id,))
         return cur.rowcount > 0
+
+
+def delete_memories(memory_ids: list[int]) -> list[int]:
+    """Delete several memory rows in one statement. Returns the ids that existed and
+    were actually removed (the caller audits each one BEFORE calling this, so a row
+    that vanished meanwhile simply never appears in the returned list)."""
+    if not memory_ids:
+        return []
+    with get_pool().connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM soc_memory_vectors WHERE id = ANY(%s) RETURNING id",
+            (memory_ids,),
+        )
+        return [r[0] for r in cur.fetchall()]

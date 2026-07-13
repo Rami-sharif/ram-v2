@@ -12,6 +12,46 @@
   <p class="muted">The agent output is immutable; the analyst actions below layer on top with audit trails and clear next steps.</p>
 </div>
 
+{% if not inv.case_id and inv.triage_action in ('create_flagged', 'create_open', 'suppress_duplicate') %}
+<section class="card case-missing">
+  <div class="panel-head">
+    <h2>No TheHive case for this alert</h2>
+    <span class="tag tag-bad">{% if inv.suppressed %}duplicate of a case that was never created{% else %}case creation failed{% endif %}</span>
+  </div>
+  {% if inv.suppressed %}
+  <p>Triage suppressed this alert as a duplicate (occurrence ×{{ inv.occurrence_count }}) and merged it
+     into the case for <span class="mono">{{ inv.agent_name }} · rule {{ inv.rule_id }} · {{ inv.source_ip }}</span>
+     — but that case creation had failed, so it was merged into nothing.</p>
+  {% else %}
+  <p>Triage routed this alert to <strong>{{ inv.triage_action }}</strong>, but TheHive did not accept
+     the case, so nothing was ever linked. The analysis above is unaffected — only the case is missing.</p>
+  {% endif %}
+  {% if inv.case_error %}<pre class="block err">{{ inv.case_error }}</pre>{% endif %}
+
+  {% if parent_case %}
+  <p>This alert's group now has a case:
+     <a href="{{ parent_case.url }}" target="_blank" rel="noopener">#{{ parent_case.case_number }}</a>.</p>
+  <form method="post" action="/console/investigations/{{ inv.id }}/case/link" class="inline">
+    <button type="submit">Link to case #{{ parent_case.case_number }}</button>
+  </form>
+  <p class="muted note">Duplicates of one alert belong in one case, so this links to the existing case
+     rather than creating a second one. Attributed to {{ analyst.username }} and audited.</p>
+  {% elif can_retry_case %}
+  <form method="post" action="/console/investigations/{{ inv.id }}/case/create" class="inline">
+    <button type="submit">Create TheHive case</button>
+  </form>
+  <p class="muted note">Creates the case triage intended — same alert, analysis, enrichment and
+     {% if inv.triage_branch == 'high' %}escalation flag{% else %}needs-review tag{% endif %}.
+     Every other alert in this dedup group then resolves to it. Attributed to {{ analyst.username }}
+     and audited.</p>
+  {% else %}
+  <p class="muted note">This one cannot be recovered automatically: no case exists for its group, and the
+     alert payload needed to rebuild one was not recorded (it predates case-retry support). Create the
+     case directly in TheHive.</p>
+  {% endif %}
+</section>
+{% endif %}
+
 <div class="detail-grid">
   <section class="card">
     <div class="panel-head">
@@ -25,7 +65,7 @@
       <span>Source IP</span><span class="mono">{% if inv.source_ip %}<span class="copyable" data-copy="{{ inv.source_ip }}" title="click to copy">{{ inv.source_ip }}</span>{% else %}—{% endif %}</span>
       <span>Rule</span><span class="mono">{{ inv.rule_id or '—' }}</span>
       <span>TheHive case</span>
-      <span>{% if case_url %}<a href="{{ case_url }}" target="_blank" rel="noopener">#{{ inv.case_number or 'open in TheHive' }}</a>{% else %}—{% endif %}</span>
+      <span>{% if case_url %}<a href="{{ case_url }}" target="_blank" rel="noopener">#{{ inv.case_number or 'open in TheHive' }}</a>{% if case_link %}<span class="tag" title="linked by {{ case_link.actor_username }} on {{ case_link.created_at.strftime('%Y-%m-%d %H:%M') }} — triage did not create this case">linked by {{ case_link.actor_username }}</span>{% endif %}{% else %}—{% endif %}</span>
     </div>
   </section>
 

@@ -10,8 +10,13 @@
       <button type="button" class="icon-btn" id="assistant-close" aria-label="Close assistant">✕</button>
     </div>
   </div>
+  {% if chat_context %}
+  <p class="chat-context">Asking about <b>{{ chat_context.label }}</b>
+    <span class="muted note">— say “this alert” and the assistant knows which one.</span></p>
+  {% else %}
   <p class="muted note">Most-recent chat. Ask about any case by number, compare cases, pivot on an
     indicator, or query the logs. Manage all chats on the <a href="/console/agent">full page</a>.</p>
+  {% endif %}
 
   <div id="chat-log" class="chat-log"
        hx-get="/console/assistant" hx-trigger="dockopen once" hx-swap="outerHTML">
@@ -19,9 +24,15 @@
   </div>
 
   <div class="chat-prompts">
+    {% if chat_context %}
+    <button type="button" class="secondary chip" data-fill-prompt="Is this alert a real threat? Explain your reasoning.">is it real?</button>
+    <button type="button" class="secondary chip" data-fill-prompt="Has this source IP or host appeared in any other case?">seen before?</button>
+    <button type="button" class="secondary chip" data-fill-prompt="What should I do next with this alert?">next steps</button>
+    {% else %}
     <button type="button" class="secondary chip" data-fill-prompt="Summarize the latest high-severity alerts and note any overlaps.">brief overview</button>
     <button type="button" class="secondary chip" data-fill-prompt="Compare the source IPs and case numbers for the latest flagged alerts.">compare cases</button>
     <button type="button" class="secondary chip" data-fill-prompt="Find the most recent case linked to the same host and summarize it.">host pivot</button>
+    {% endif %}
   </div>
 
   <form class="chat-form"
@@ -29,8 +40,11 @@
         hx-target="#chat-log" hx-swap="beforeend"
         hx-vals='js:{conversation_id: document.getElementById("chat-log")?.dataset.conversationId || ""}'
         hx-on::after-request="if(event.detail.successful){this.reset();var e=document.getElementById('chat-empty');if(e)e.remove();}">
+    {% if chat_context %}
+    <input type="hidden" name="investigation_id" value="{{ chat_context.investigation_id }}">
+    {% endif %}
     <textarea name="message" rows="2" required
-      placeholder="Ask the assistant… (Enter to send, Shift+Enter for a newline)"></textarea>
+      placeholder="{% if chat_context %}Ask about {{ chat_context.label }}…{% else %}Ask the assistant… (Enter to send, Shift+Enter for a newline){% endif %}"></textarea>
     <button type="submit">Send</button>
   </form>
   <p class="muted note">The assistant may take audited actions (verdict, triage feedback, case

@@ -159,18 +159,136 @@
     if (e.key === "Escape" && dockOpen()) closeDock();
   });
 
+  /* --- queue row delete: arm, then confirm --------------------------------- */
+  // Deleting an investigation is irreversible, so it takes two deliberate clicks.
+  // The confirmation happens in the row itself (a native confirm() dialog throws
+  // the analyst out of the interface to ask one question). Only one row can be
+  // armed at a time; Escape or a click elsewhere stands it down.
+  function disarmAll(except) {
+    document.querySelectorAll(".row-delete.armed").forEach(function (f) {
+      if (f === except) return;
+      f.classList.remove("armed");
+      var c = f.querySelector(".arm-confirm");
+      if (c) c.hidden = true;
+      var r = f.closest("tr");
+      if (r) r.classList.remove("row-arming");
+    });
+  }
+  function armDelete(form) {
+    disarmAll(form);
+    form.classList.add("armed");
+    var confirm = form.querySelector(".arm-confirm");
+    if (confirm) confirm.hidden = false;
+    var row = form.closest("tr");
+    if (row) row.classList.add("row-arming");
+    var confirmBtn = form.querySelector(".btn-confirm-delete");
+    if (confirmBtn) confirmBtn.focus();
+  }
+
+  document.addEventListener("click", function (e) {
+    var arm = e.target.closest ? e.target.closest("[data-arm-delete]") : null;
+    if (arm) {
+      e.preventDefault();
+      e.stopPropagation();
+      armDelete(arm.closest(".row-delete"));
+      return;
+    }
+    var cancel = e.target.closest ? e.target.closest("[data-cancel-delete]") : null;
+    if (cancel) {
+      e.preventDefault();
+      e.stopPropagation();
+      disarmAll();
+      return;
+    }
+    if (!e.target.closest || e.target.closest(".row-delete.armed")) return;
+    // A click anywhere else stands the armed row down. If that click landed on the
+    // armed row itself, it must ONLY stand it down — not also open the row — so we
+    // stop the click-through handler (registered after this one) from seeing it.
+    var armedRow = document.querySelector("tr.row-arming");
+    disarmAll();
+    if (armedRow && armedRow.contains(e.target)) e.stopImmediatePropagation();
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") disarmAll();
+  });
+
+  /* --- bulk selection (queue + memory) ------------------------------------ */
+  // The bulk bar only exists once a row is selected — an empty toolbar sitting
+  // above the table is noise. Same two-step arm/confirm as the single-row delete,
+  // and the confirm button restates the count so nobody destroys 25 rows thinking
+  // they picked 2.
+  function bulkBar() { return document.querySelector("[data-bulk-bar]"); }
+  function selected() {
+    return Array.prototype.slice.call(document.querySelectorAll("[data-row-select]:checked"));
+  }
+  function disarmBulk() {
+    var bar = bulkBar();
+    if (!bar) return;
+    bar.classList.remove("armed");
+    var c = bar.querySelector(".bulk-confirm");
+    if (c) c.hidden = true;
+    var arm = bar.querySelector("[data-bulk-arm]");
+    if (arm) arm.hidden = false;
+  }
+  function syncBulk() {
+    var bar = bulkBar();
+    if (!bar) return;
+    var n = selected().length;
+    bar.querySelectorAll("[data-bulk-count]").forEach(function (el) { el.textContent = n; });
+    bar.hidden = n === 0;
+    if (n === 0) disarmBulk();
+    var all = document.querySelector("[data-select-all]");
+    var boxes = document.querySelectorAll("[data-row-select]");
+    if (all) {
+      all.checked = n > 0 && n === boxes.length;
+      all.indeterminate = n > 0 && n < boxes.length;
+    }
+  }
+
+  document.addEventListener("change", function (e) {
+    if (e.target.matches && e.target.matches("[data-select-all]")) {
+      var on = e.target.checked;
+      document.querySelectorAll("[data-row-select]").forEach(function (b) { b.checked = on; });
+      syncBulk();
+      return;
+    }
+    if (e.target.matches && e.target.matches("[data-row-select]")) syncBulk();
+  });
+
+  document.addEventListener("click", function (e) {
+    if (!e.target.closest) return;
+    if (e.target.closest("[data-bulk-arm]")) {
+      var bar = bulkBar();
+      bar.classList.add("armed");
+      bar.querySelector(".bulk-confirm").hidden = false;
+      e.target.closest("[data-bulk-arm]").hidden = true;
+      var go = bar.querySelector("[data-bulk-submit]");
+      if (go) go.focus();
+      return;
+    }
+    if (e.target.closest("[data-bulk-disarm]")) { disarmBulk(); return; }
+    if (e.target.closest("[data-bulk-clear]")) {
+      document.querySelectorAll("[data-row-select]").forEach(function (b) { b.checked = false; });
+      syncBulk();
+      return;
+    }
+  });
+
   /* --- queue row click-through -------------------------------------------- */
   // Whole row opens the investigation, except when a link/button/copyable cell
-  // was the actual click target (those keep their own behavior).
+  // was the actual click target (those keep their own behavior), or when the row
+  // is armed for deletion (a stray click must not navigate away mid-decision).
   document.addEventListener("click", function (e) {
     var row = e.target.closest ? e.target.closest("tr[data-href]") : null;
     if (!row) return;
-    if (e.target.closest("a, button, [data-copy]")) return;
+    if (row.classList.contains("row-arming")) return;
+    if (e.target.closest("a, button, input, label, form, [data-copy], .col-select")) return;
     window.location.href = row.getAttribute("data-href");
   });
 
   document.addEventListener("DOMContentLoaded", function () {
     scrollChat();
+    syncBulk();  // a back/forward restore can bring checked boxes with it
     document.querySelectorAll(".flash").forEach(function (f) {
       toast(f.textContent.trim(), f.classList.contains("bad") ? "bad" : "ok");
       f.remove();

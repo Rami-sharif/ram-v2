@@ -230,24 +230,53 @@ def _collect_referenced(result: Any, acc: list[int]) -> None:
             acc.append(mid)
 
 
+def _focus_preamble(inv: dict[str, Any]) -> str:
+    """Console-supplied context for a chat started from an investigation page: the
+    record the analyst is looking at right now. Stated as context, not as an
+    instruction — an unqualified 'this alert' / 'this case' means this one."""
+    analysis = inv.get("analysis") or {}
+    lines = [
+        "[console context] The analyst is currently viewing this investigation and, unless they "
+        "clearly name another case, their question is about it:",
+        f"- investigation_id: {inv.get('id')}",
+        f"- case_number: {inv.get('case_number') or 'none (no TheHive case)'}",
+        f"- alert_id: {inv.get('alert_id') or '—'}",
+        f"- host: {inv.get('agent_name') or '—'}  source_ip: {inv.get('source_ip') or '—'}"
+        f"  rule: {inv.get('rule_id') or '—'}",
+        f"- agent verdict: {inv.get('severity_label') or '—'} "
+        f"(score {inv.get('severity_score')}), attack type: {inv.get('attack_type') or '—'}",
+        f"- triage: {inv.get('triage_action') or '—'}",
+        f"- summary: {analysis.get('summary') or '—'}",
+    ]
+    if inv.get("case_number"):
+        lines.append("Before taking any audited action on it, look it up in THIS turn with "
+                     f"get_investigation_by_case_number(case_number={inv['case_number']}).")
+    return "\n".join(lines)
+
+
 def run_interactive(
     message: str, analyst_username: str, history: list[dict] | None = None,
+    focus_investigation: dict[str, Any] | None = None,
 ) -> tuple[str, list[dict[str, Any]], list[int]]:
     """Run one dashboard chat turn. Returns (reply_text, tool_calls, referenced_ids).
 
-    No case is anchored up front: the assistant looks up any case the analyst names
-    via get_investigation_by_case_number, which also focuses ctx.investigation so a
+    `focus_investigation` is the record the analyst is chatting FROM (the console
+    passes it when the dock is opened on an investigation page); it anchors the turn
+    so "is this a real threat?" needs no case number. When absent, no case is
+    anchored up front and the assistant looks up any case the analyst names via
+    get_investigation_by_case_number, which also focuses ctx.investigation so a
     same-turn audited action targets that case. `history` is the prior conversation
     as [{role: 'analyst'|'agent', message}]. Actions taken here go through the same
     audited tool functions, so every consequential action still produces its own
     audit_log row. `referenced_ids` are the investigation ids this turn discussed."""
     settings = get_settings()
     client = genai.Client(api_key=settings.gemini_api_key)
-    # Start with no focused case and an empty alert; the case-lookup tool sets
-    # ctx.investigation when the analyst references a case. Identity is fixed to
-    # the authenticated session — never taken from the model.
+    # Focus the anchored case (if any) and an empty alert; the case-lookup tool
+    # re-focuses ctx.investigation when the analyst references a different case.
+    # Identity is fixed to the authenticated session — never taken from the model.
     ctx = tools.ToolContext(
-        alert=WazuhAlert(), analyst_username=analyst_username, investigation=None,
+        alert=WazuhAlert(), analyst_username=analyst_username,
+        investigation=focus_investigation,
     )
     registry = {**tools.TOOL_REGISTRY, **tools.INTERACTIVE_REGISTRY, **tools.ACTION_REGISTRY}
 
@@ -255,10 +284,15 @@ def run_interactive(
     for h in history or []:
         role = "user" if h.get("role") == "analyst" else "model"
         contents.append(types.Content(role=role, parts=[types.Part(text=h.get("message") or "")]))
+    if focus_investigation:
+        # Sent alongside this turn only, so the anchor follows the page the analyst
+        # is on rather than sticking to the conversation forever.
+        contents.append(types.Content(
+            role="user", parts=[types.Part(text=_focus_preamble(focus_investigation))]))
     contents.append(types.Content(role="user", parts=[types.Part(text=message)]))
 
     tool_calls: list[dict[str, Any]] = []
-    referenced: list[int] = []
+    referenced: list[int] = [focus_investigation["id"]] if focus_investigation else []
 
     for iteration in range(1, settings.agent_max_iterations + 1):
         response = client.models.generate_content(

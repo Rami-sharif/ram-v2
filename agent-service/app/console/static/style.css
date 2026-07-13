@@ -56,6 +56,9 @@
   --bad-fg:#ff6685; --bad-bg:rgba(240,64,96,.14); --bad-bd:rgba(240,64,96,.42);
 
   --shadow:0 1px 2px rgba(0,0,0,.5), 0 8px 28px rgba(0,0,0,.32);
+
+  /* height of the sticky topbar — anything else that sticks parks below it */
+  --topbar-h:53px;
 }
 
 * { box-sizing:border-box; }
@@ -198,11 +201,30 @@ button:active { transform:translateY(1px); }
 button.secondary { background:var(--panel-3); color:var(--ink); border:1px solid var(--line-2); }
 button.secondary:hover { background:var(--panel-2); }
 button.danger { background:var(--bad-fg); color:#25060d; }
+button.danger:hover { background:#ff7f9a; }
+
+/* One focus treatment for everything focusable. Keyboard users get the same cyan
+   ring the inputs already had; mouse users see nothing (:focus-visible). */
+a:focus-visible, button:focus-visible, [tabindex]:focus-visible {
+  outline:2px solid var(--signal); outline-offset:2px; border-radius:var(--r-sm);
+}
 
 .filters { display:flex; gap:var(--sp-2); align-items:center; flex-wrap:wrap; margin:var(--sp-4) 0; }
 .filters input[type=text] { min-width:220px; flex:1 1 220px; }
 .pager { display:flex; gap:var(--sp-4); align-items:center; margin-top:var(--sp-4);
   font-family:var(--mono); font-size:var(--fs-sm); }
+
+/* An empty queue is the GOOD state in a SOC — say so, and offer the next move. */
+.empty-state { padding:var(--sp-6) var(--sp-4); text-align:center; }
+.empty-state .empty-title {
+  font-family:var(--mono); font-size:var(--fs-md); font-weight:640;
+  letter-spacing:.02em; color:var(--ink); margin:0 0 var(--sp-2);
+}
+.empty-state .empty-title::before {
+  content:""; display:block; width:8px; height:8px; margin:0 auto var(--sp-3);
+  border-radius:2px; background:var(--ok-fg); box-shadow:0 0 12px rgba(95,211,154,.6);
+}
+.empty-state p { margin:0; }
 
 /* ==========================================================================
    Threat badges (LED) — shared across queue / detail / memory
@@ -229,6 +251,9 @@ button.danger { background:var(--bad-fg); color:#25060d; }
   background:var(--panel-3); color:var(--ink-dim); border:1px solid var(--line);
 }
 .tag-mute { background:rgba(150,110,190,.12); color:#c69cd8; border-color:rgba(150,110,190,.25); }
+/* a case-creating alert whose TheHive case is missing (creation failed, retryable) */
+.tag-bad { background:var(--bad-bg); color:var(--bad-fg); border-color:var(--bad-bd); text-decoration:none; }
+.card.case-missing { border-color:var(--bad-bd); border-left:2px solid var(--bad-fg); }
 .tag.review-confirmed { background:var(--ok-bg); color:var(--ok-fg); border-color:var(--ok-bd); }
 .tag.review-corrected { background:rgba(51,207,208,.1); color:var(--signal); border-color:rgba(51,207,208,.3); }
 
@@ -241,10 +266,19 @@ thead th {
   font-family:var(--mono); font-size:var(--fs-xs); font-weight:600;
   text-transform:uppercase; letter-spacing:.1em; color:var(--ink-faint);
   border-bottom:1px solid var(--line);
+  /* the header stays put while a long queue scrolls under it, parked directly
+     below the sticky topbar (hence the offset, not top:0) */
+  position:sticky; top:var(--topbar-h); z-index:5;
+  background:linear-gradient(180deg,#0e131b,#0d1119);
+  backdrop-filter:blur(6px);
 }
 tbody td { padding:var(--sp-3); border-bottom:1px solid var(--line); vertical-align:middle; }
 tbody tr { transition:background .1s; }
-tbody tr:hover { background:rgba(51,207,208,.04); }
+/* Hover has to be readable across 11 columns, so it lifts the whole row and lights
+   the severity rail rather than tinting it almost invisibly. */
+tbody tr.row:hover { background:var(--panel-2); }
+tbody tr.row:hover td:first-child::before { box-shadow:0 0 12px color-mix(in srgb,var(--c) 90%,transparent); }
+tbody tr.row:focus-within { background:var(--panel-2); outline:1px solid var(--line-2); }
 
 /* severity rail: colored LED strip on the leading cell of each contact row */
 tr.row { --c:var(--sev-info-rail); }
@@ -260,6 +294,108 @@ tr.row td:first-child::before {
 }
 tr.row.sev-row-critical td:first-child::before { animation:railpulse 1.8s ease-in-out infinite; }
 @keyframes railpulse { 0%,100%{opacity:1;} 50%{opacity:.4;} }
+
+/* --------------------------------------------------------------------------
+   Row actions (queue): OPEN is the row's primary act and stays legible at rest.
+   DELETE is destructive, so it is disclosed on hover/focus rather than sitting
+   armed on every row of a dense table, and it confirms INSIDE the row — a native
+   confirm() dialog throws the analyst out of the interface to ask one question.
+   -------------------------------------------------------------------------- */
+td.row-actions { width:1%; white-space:nowrap; }
+.row-actions-inner { display:flex; align-items:center; justify-content:flex-end; gap:var(--sp-2); }
+
+.btn-open {
+  display:inline-flex; align-items:center; gap:.4em;
+  font-family:var(--mono); font-size:var(--fs-xs); font-weight:640;
+  letter-spacing:.1em; text-transform:uppercase;
+  padding:.34rem .6rem; border-radius:var(--r-sm);
+  color:var(--ink-dim); background:var(--panel-2); border:1px solid var(--line);
+  transition:color .12s, border-color .12s, background .12s;
+}
+.btn-open .caret { color:var(--ink-faint); transition:transform .12s, color .12s; }
+tr.row:hover .btn-open { color:var(--signal); border-color:var(--line-2); background:var(--panel-3); }
+tr.row:hover .btn-open .caret { color:var(--signal); transform:translateX(2px); }
+.btn-open:hover { color:var(--signal-ink); background:var(--signal); border-color:var(--signal); }
+.btn-open:hover .caret { color:var(--signal-ink); }
+
+.row-delete { display:inline-flex; align-items:center; margin:0; }
+.btn-trash {
+  display:inline-flex; align-items:center; justify-content:center;
+  width:30px; height:28px; padding:0; cursor:pointer;
+  background:transparent; color:var(--ink-faint);
+  border:1px solid transparent; border-radius:var(--r-sm);
+  opacity:0; transition:opacity .12s, color .12s, background .12s, border-color .12s;
+}
+.btn-trash svg { width:14px; height:14px; }
+/* disclosed only when the row is engaged — and always for keyboard/touch */
+tr.row:hover .btn-trash, tr.row:focus-within .btn-trash, .btn-trash:focus-visible { opacity:1; }
+.btn-trash:hover { color:var(--bad-fg); background:var(--bad-bg); border-color:var(--bad-bd); }
+
+/* armed state: the row itself signals danger while the analyst decides.
+   The confirm controls carry the `hidden` ATTRIBUTE at rest (JS removes it on arm),
+   so they stay hidden even if this stylesheet is stale or never loads — a cached CSS
+   must never leave a destructive button exposed. */
+[hidden] { display:none !important; }
+.row-delete.armed .btn-trash { display:none; }
+.arm-confirm { align-items:center; gap:var(--sp-1); animation:arm-in .12s ease-out; }
+.row-delete.armed .arm-confirm { display:inline-flex; }
+@keyframes arm-in { from{opacity:0;transform:translateX(4px);} to{opacity:1;transform:none;} }
+.arm-confirm button {
+  font-size:var(--fs-xs); padding:.3rem .55rem; letter-spacing:.08em; border-radius:var(--r-sm);
+}
+.btn-confirm-delete { background:var(--bad-fg); color:#25060d; }
+.btn-confirm-delete:hover { background:#ff7f9a; }
+.btn-cancel-delete { background:transparent; color:var(--ink-dim); border:1px solid var(--line-2); }
+.btn-cancel-delete:hover { background:var(--panel-3); color:var(--ink); }
+tr.row.row-arming { background:var(--bad-bg); }
+tr.row.row-arming td:first-child::before { background:var(--bad-fg); box-shadow:0 0 10px var(--bad-bd); }
+
+/* --------------------------------------------------------------------------
+   Bulk selection: a select column, and a bar that only exists once something is
+   selected (an always-present empty toolbar is just noise above the data).
+   -------------------------------------------------------------------------- */
+th.col-select, td.col-select { width:1%; padding-right:0; }
+td.col-select { padding-left:var(--sp-4); }  /* clear of the severity rail */
+.col-select input[type=checkbox] {
+  appearance:none; -webkit-appearance:none; margin:0;
+  width:15px; height:15px; padding:0; cursor:pointer; vertical-align:middle;
+  background:var(--panel-2); border:1px solid var(--line-2); border-radius:3px;
+  display:inline-grid; place-content:center; transition:background .1s, border-color .1s;
+}
+.col-select input[type=checkbox]::before {
+  content:""; width:8px; height:8px; transform:scale(0); transition:transform .1s ease-out;
+  background:var(--signal-ink);
+  clip-path:polygon(14% 44%, 0 60%, 40% 100%, 100% 18%, 84% 0, 39% 68%);
+}
+.col-select input[type=checkbox]:checked,
+.col-select input[type=checkbox]:indeterminate { background:var(--signal); border-color:var(--signal); }
+.col-select input[type=checkbox]:checked::before { transform:scale(1); }
+.col-select input[type=checkbox]:indeterminate::before {
+  transform:scale(1); clip-path:none; height:2px; width:9px; background:var(--signal-ink);
+}
+tr.row:has(input[data-row-select]:checked) { background:rgba(51,207,208,.07); }
+
+.bulk-bar {
+  display:flex; align-items:center; gap:var(--sp-3); flex-wrap:wrap;
+  position:sticky; top:var(--topbar-h); z-index:6;
+  margin:0 0 var(--sp-2); padding:var(--sp-2) var(--sp-3);
+  background:linear-gradient(180deg, var(--panel-3), var(--panel-2));
+  border:1px solid var(--line-2); border-left:2px solid var(--signal);
+  border-radius:var(--r); box-shadow:var(--shadow);
+  animation:arm-in .12s ease-out;
+}
+.bulk-bar.armed { border-left-color:var(--bad-fg); border-color:var(--bad-bd); background:var(--bad-bg); }
+.bulk-count {
+  font-family:var(--mono); font-size:var(--fs-xs); text-transform:uppercase;
+  letter-spacing:.1em; color:var(--ink-dim);
+}
+.bulk-count b { color:var(--signal); font-weight:700; }
+.bulk-bar.armed .bulk-count b { color:var(--bad-fg); }
+.bulk-spacer { flex:1; }
+.bulk-confirm { display:flex; align-items:center; gap:var(--sp-2); flex-wrap:wrap; }
+.bulk-warn { font-size:var(--fs-xs); color:var(--bad-fg); }
+.bulk-bar button { font-size:var(--fs-xs); padding:.4rem .7rem; }
+.bulk-confirm b { font-weight:700; }
 
 .copyable { cursor:pointer; border-bottom:1px dotted var(--line-2); }
 .copyable:hover { color:var(--signal); border-bottom-color:var(--signal); }
@@ -402,6 +538,14 @@ textarea.code { width:100%; font-family:var(--mono); font-size:var(--fs-sm); }
   }
   table.responsive td[data-label=""]::before { content:""; }
   .snippet { max-width:none; }
+
+  /* On touch there is no hover to disclose with, so the row actions are always
+     visible and sized for a finger (44px is the accessible floor). */
+  table.responsive td.row-actions { width:auto; }
+  .row-actions-inner { justify-content:space-between; width:100%; }
+  .btn-trash { opacity:1; width:44px; height:44px; border-color:var(--line); }
+  .btn-open { padding:.6rem .9rem; }
+  .arm-confirm button { padding:.6rem .8rem; }
 }
 
 @media (prefers-reduced-motion:reduce) { *{ animation:none !important; transition:none !important; } }
@@ -521,6 +665,14 @@ tr.row[data-href] { cursor:pointer; }
   border-radius:var(--r-sm); padding:var(--sp-1) var(--sp-2); cursor:pointer; font-family:var(--mono);
 }
 .icon-btn:hover { color:var(--ink); border-color:var(--line-2); background:var(--panel-2); }
+.icon-btn.danger { background:transparent; color:var(--ink-faint); }
+.icon-btn.danger:hover { color:var(--bad-fg); background:var(--bad-bg); border-color:var(--bad-bd); }
+/* dock banner shown when the chat is anchored to the investigation being viewed */
+.chat-context {
+  margin:0; padding:var(--sp-2); border:1px solid var(--line);
+  border-left:2px solid var(--signal); border-radius:var(--r-sm);
+  background:var(--panel-2); font-size:var(--fs-sm);
+}
 .assistant-dock .chat-log { flex:1; max-height:none; }
 .assistant-dock .chat-prompts { margin-top:var(--sp-2); }
 @media (max-width:760px) {

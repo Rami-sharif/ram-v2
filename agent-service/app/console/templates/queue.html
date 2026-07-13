@@ -42,9 +42,28 @@
   </div>
 </div>
 
+{# The bulk form lives OUTSIDE the table: row checkboxes join it via form="bulk-delete"
+   (nesting it around rows that already contain a delete form would be invalid HTML). #}
+<form method="post" action="/console/investigations/bulk-delete" id="bulk-delete"
+      class="bulk-bar" data-bulk-bar hidden>
+  <input type="hidden" name="back" value="{{ request.url.query }}">
+  <span class="bulk-count"><b data-bulk-count>0</b> selected</span>
+  <button type="button" class="btn-cancel-delete" data-bulk-clear>clear</button>
+  <span class="bulk-spacer"></span>
+  <button type="button" class="danger" data-bulk-arm>Delete selected</button>
+  <span class="bulk-confirm" hidden>
+    <span class="bulk-warn">Removes the agent output and any verdict or feedback recorded on them. Cannot be undone.</span>
+    <button type="submit" class="btn-confirm-delete" data-bulk-submit>Delete <b data-bulk-count>0</b></button>
+    <button type="button" class="btn-cancel-delete" data-bulk-disarm>keep</button>
+  </span>
+</form>
+
 <table class="responsive">
   <thead>
     <tr>
+      <th class="col-select">
+        <input type="checkbox" data-select-all aria-label="Select every alert on this page">
+      </th>
       <th>Time</th><th>Severity</th><th>Attack type</th><th>Host</th>
       <th>Source IP</th><th>Rule</th><th>Triage</th><th>Review</th><th>Seen</th><th>Case</th><th></th>
     </tr>
@@ -52,6 +71,10 @@
   <tbody>
     {% for r in rows %}
     <tr class="row sev-row-{{ r.severity_label }}" data-href="/console/investigations/{{ r.id }}">
+      <td data-label="Select" class="col-select">
+        <input type="checkbox" form="bulk-delete" name="ids" value="{{ r.id }}"
+               data-row-select aria-label="Select investigation {{ r.id }}">
+      </td>
       <td data-label="Time" class="nowrap muted">{{ r.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
       <td data-label="Severity"><span class="sev sev-{{ r.severity_label }}">{{ r.severity_label }}</span>
           <span class="muted">{{ r.severity_score }}</span></td>
@@ -67,12 +90,44 @@
         {% else %}<span class="muted">unreviewed</span>{% endif %}</td>
       <td data-label="Seen">{% if r.occurrence_count %}×{{ r.occurrence_count }}{% else %}—{% endif %}</td>
       <td data-label="Case">{% if r.case_number %}<span class="copyable" data-copy="{{ r.case_number }}" title="click to copy case number">#{{ r.case_number }}</span>{% endif %}
-          {% if r.case_url %}<a href="{{ r.case_url }}" target="_blank" rel="noopener">↗</a>{% elif not r.case_number %}—{% endif %}</td>
-      <td data-label=""><a href="/console/investigations/{{ r.id }}">open</a></td>
+          {% if r.case_url %}<a href="{{ r.case_url }}" target="_blank" rel="noopener">↗</a>
+          {% elif r.triage_action in ('create_flagged', 'create_open', 'suppress_duplicate') %}
+            <a class="tag tag-bad" href="/console/investigations/{{ r.id }}"
+               title="{{ r.case_error or 'TheHive case creation failed' }} — open to create the case">no case</a>
+          {% elif not r.case_number %}—{% endif %}</td>
+      <td data-label="" class="row-actions">
+        <div class="row-actions-inner">
+          <a class="btn-open" href="/console/investigations/{{ r.id }}">open<span class="caret" aria-hidden="true">›</span></a>
+          <form method="post" action="/console/investigations/{{ r.id }}/delete" class="row-delete">
+            <input type="hidden" name="back" value="{{ request.url.query }}">
+            <button type="button" class="btn-trash" data-arm-delete
+                    title="Delete investigation #{{ r.id }} from the queue"
+                    aria-label="Delete investigation {{ r.id }}">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                   stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14M10 11v6M14 11v6"/>
+              </svg>
+            </button>
+            <span class="arm-confirm" hidden>
+              <button type="submit" class="btn-confirm-delete">delete</button>
+              <button type="button" class="btn-cancel-delete" data-cancel-delete>keep</button>
+            </span>
+          </form>
+        </div>
+      </td>
     </tr>
     {% else %}
-    <tr><td colspan="11" class="muted">
-      {% if show_all %}No investigations recorded yet.{% else %}No actionable investigations — <a href="/console/queue?show=all">show resolved</a>.{% endif %}
+    <tr><td colspan="12">
+      <div class="empty-state">
+        {% if show_all %}
+        <p class="empty-title">Nothing has come through yet</p>
+        <p class="muted">Investigations appear here the moment Wazuh forwards an alert and the agent finishes triaging it.</p>
+        {% else %}
+        <p class="empty-title">Queue clear — nothing needs an analyst</p>
+        <p class="muted">Every alert has been auto-closed or already reviewed.
+          <a href="/console/queue?show=all">Show resolved</a> to see the full record.</p>
+        {% endif %}
+      </div>
     </td></tr>
     {% endfor %}
   </tbody>

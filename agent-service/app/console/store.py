@@ -42,33 +42,50 @@ def record_investigation(
     *, alert_id, agent_name, source_ip, rule_id, severity_score, severity_label,
     attack_type, analysis, tool_trace, memory_context, retrieved_ids,
     triage_action, triage_branch, occurrence_count, suppressed, case_id, case_number,
-    memory_id=None,
+    memory_id=None, case_error=None, alert_payload=None, enrichment=None,
 ) -> int:
     """Insert the agent's output for one alert. Write-once: the row is never
     UPDATEd (DB trigger enforces this). Human input lives in separate tables.
     memory_id links this alert's own semantic-memory row so a later analyst
-    verdict can teach it back (the learning loop)."""
+    verdict can teach it back (the learning loop).
+
+    case_error / alert_payload / enrichment capture a FAILED case creation and the
+    inputs needed to replay it, so a case-creating alert that TheHive refused can
+    still be linked later (see console case retry). All three are insert-time
+    values, so the write-once guarantee is untouched."""
     with get_pool().connection() as conn, conn.cursor() as cur:
         cur.execute(
             "INSERT INTO alert_investigations ("
             " alert_id, agent_name, source_ip, rule_id, severity_score, severity_label,"
             " attack_type, analysis, tool_trace, memory_context, retrieved_ids,"
             " triage_action, triage_branch, occurrence_count, suppressed, case_id, case_number,"
-            " memory_id"
-            ") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+            " memory_id, case_error, alert_payload, enrichment"
+            ") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
             (alert_id, agent_name, source_ip, rule_id, severity_score, severity_label,
              attack_type, Json(analysis), Json(tool_trace), memory_context,
              Json(retrieved_ids) if retrieved_ids is not None else None,
              triage_action, triage_branch, occurrence_count, suppressed, case_id, case_number,
-             memory_id),
+             memory_id, case_error,
+             Json(alert_payload) if alert_payload is not None else None,
+             Json(enrichment) if enrichment is not None else None),
         )
         return cur.fetchone()[0]
 
 
+# The effective case of an investigation is the one triage created, OR — when that
+# failed and an analyst retried from the console — the one linked afterwards. Every
+# list view resolves it the same way, through this join, so a retried case shows up
+# everywhere a triage-created one does.
+_QUEUE_FROM = (
+    "alert_investigations ai "
+    "LEFT JOIN investigation_case_links l ON l.investigation_id = ai.id"
+)
 _QUEUE_COLS = (
-    "id, created_at, alert_id, agent_name, source_ip, rule_id, severity_score, "
-    "severity_label, attack_type, triage_action, triage_branch, occurrence_count, "
-    "suppressed, case_id, case_number"
+    "ai.id, ai.created_at, ai.alert_id, ai.agent_name, ai.source_ip, ai.rule_id, "
+    "ai.severity_score, ai.severity_label, ai.attack_type, ai.triage_action, "
+    "ai.triage_branch, ai.occurrence_count, ai.suppressed, ai.case_error, "
+    "coalesce(ai.case_id, l.case_id) AS case_id, "
+    "coalesce(ai.case_number, l.case_number) AS case_number"
 )
 
 
@@ -81,29 +98,29 @@ def list_investigations(*, severity_label=None, triage_action=None, agent_name=N
     Ignored when an explicit `triage_action` filter is supplied."""
     where, params = [], []
     if severity_label:
-        where.append("severity_label = %s"); params.append(severity_label)
+        where.append("ai.severity_label = %s"); params.append(severity_label)
     if triage_action:
-        where.append("triage_action = %s"); params.append(triage_action)
+        where.append("ai.triage_action = %s"); params.append(triage_action)
     elif exclude_actions:
         placeholders = ", ".join(["%s"] * len(exclude_actions))
-        where.append(f"triage_action NOT IN ({placeholders})")
+        where.append(f"ai.triage_action NOT IN ({placeholders})")
         params.extend(exclude_actions)
     if agent_name:
-        where.append("agent_name = %s"); params.append(agent_name)
+        where.append("ai.agent_name = %s"); params.append(agent_name)
     if search:
-        where.append("(alert_id ILIKE %s OR agent_name ILIKE %s OR source_ip ILIKE %s)")
+        where.append("(ai.alert_id ILIKE %s OR ai.agent_name ILIKE %s OR ai.source_ip ILIKE %s)")
         like = f"%{search}%"; params.extend([like, like, like])
     clause = (" WHERE " + " AND ".join(where)) if where else ""
     with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(f"SELECT count(*) AS n FROM alert_investigations{clause}", params)
+        cur.execute(f"SELECT count(*) AS n FROM {_QUEUE_FROM}{clause}", params)
         total = cur.fetchone()["n"]
         cur.execute(
             f"SELECT {_QUEUE_COLS}, "
             " (SELECT vr.action FROM verdict_reviews vr "
-            "  WHERE vr.investigation_id = alert_investigations.id "
+            "  WHERE vr.investigation_id = ai.id "
             "  ORDER BY vr.created_at DESC LIMIT 1) AS review_status "
-            f"FROM alert_investigations{clause} "
-            "ORDER BY created_at DESC LIMIT %s OFFSET %s",
+            f"FROM {_QUEUE_FROM}{clause} "
+            "ORDER BY ai.created_at DESC LIMIT %s OFFSET %s",
             [*params, limit, offset],
         )
         return cur.fetchall(), total
@@ -120,11 +137,16 @@ def summary_counts() -> dict[str, int]:
         cur.execute(
             "SELECT "
             " count(*) AS total, "
-            " count(*) FILTER (WHERE lower(severity_label) IN ('high','critical')) AS high, "
-            " count(*) FILTER (WHERE triage_action = 'create_flagged') AS flagged, "
-            " count(*) FILTER (WHERE case_number IS NOT NULL) AS linked_cases, "
-            " count(*) FILTER (WHERE suppressed) AS suppressed "
-            "FROM alert_investigations"
+            " count(*) FILTER (WHERE lower(ai.severity_label) IN ('high','critical')) AS high, "
+            " count(*) FILTER (WHERE ai.triage_action = 'create_flagged') AS flagged, "
+            " count(*) FILTER (WHERE coalesce(ai.case_number, l.case_number) IS NOT NULL) "
+            "   AS linked_cases, "
+            # case-creating alerts still missing a case: what the retry button exists for
+            " count(*) FILTER (WHERE ai.triage_action IN ('create_flagged','create_open') "
+            "   AND coalesce(ai.case_id, l.case_id) IS NULL AND NOT coalesce(ai.suppressed, false)) "
+            "   AS missing_cases, "
+            " count(*) FILTER (WHERE ai.suppressed) AS suppressed "
+            f"FROM {_QUEUE_FROM}"
         )
         row = cur.fetchone()
     # count(*) FILTER returns None only on an empty table for the filtered ones
@@ -201,7 +223,7 @@ def needs_attention(limit: int = 8) -> list[dict[str, Any]]:
     'what needs me now' list on the Overview."""
     with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            f"SELECT {_QUEUE_COLS} FROM alert_investigations ai "
+            f"SELECT {_QUEUE_COLS} FROM {_QUEUE_FROM} "
             "WHERE (lower(ai.severity_label) IN ('high','critical') "
             "       OR ai.triage_action = 'create_flagged') "
             "AND NOT EXISTS (SELECT 1 FROM verdict_reviews vr "
@@ -214,12 +236,26 @@ def needs_attention(limit: int = 8) -> list[dict[str, Any]]:
 
 
 def get_investigation(inv_id: int):
-    """Full investigation record + any layered human input (read-only here)."""
+    """Full investigation record + any layered human input (read-only here).
+
+    The immutable row is returned with its case RESOLVED: if triage failed to create
+    a case and an analyst later retried, inv['case_id'] / inv['case_number'] carry the
+    linked case (the link row itself is under 'case_link'), so callers see one case
+    regardless of which attempt produced it."""
     with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute("SELECT * FROM alert_investigations WHERE id = %s", (inv_id,))
         inv = cur.fetchone()
         if inv is None:
             return None
+        cur.execute(
+            "SELECT case_id, case_number, actor_username, created_at "
+            "FROM investigation_case_links WHERE investigation_id = %s",
+            (inv_id,),
+        )
+        case_link = cur.fetchone()
+        if case_link and not inv.get("case_id"):
+            inv["case_id"] = case_link["case_id"]
+            inv["case_number"] = case_link["case_number"]
         cur.execute(
             "SELECT actor_username, action, override_payload, reason, created_at "
             "FROM verdict_reviews WHERE investigation_id = %s ORDER BY created_at DESC",
@@ -232,7 +268,96 @@ def get_investigation(inv_id: int):
             (inv_id,),
         )
         feedback = cur.fetchall()
-    return {"inv": inv, "reviews": reviews, "feedback": feedback}
+    return {"inv": inv, "reviews": reviews, "feedback": feedback, "case_link": case_link}
+
+
+def link_case(*, investigation_id: int, case_id: str, case_number, actor_username: str,
+              action: str = "investigation_case_retry", detail: Optional[str] = None,
+              before: Any = None) -> int:
+    """Attach a TheHive case to an investigation that has none — either a case the
+    analyst just created (action=investigation_case_retry) or the existing case its
+    dedup group belongs to (action=investigation_case_link).
+
+    This is the ONE update-shaped operation on an investigation, and it deliberately
+    lives in its own table: alert_investigations stays write-once (agent output is
+    never rewritten) and the link is an attributed human action, so it is inserted
+    with its audit row in the SAME transaction.
+
+    The UNIQUE constraint on investigation_id is the race guard: two analysts acting
+    at once means the second INSERT fails and its transaction (link + audit) rolls
+    back."""
+    with get_pool().connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO investigation_case_links "
+            "(investigation_id, case_id, case_number, actor_username) "
+            "VALUES (%s, %s, %s, %s) RETURNING id",
+            (investigation_id, case_id, case_number, actor_username),
+        )
+        link_id = cur.fetchone()[0]
+        _audit_on(cur, actor_username, action, target_type="investigation",
+                  target_id=str(investigation_id), before=before,
+                  after={"case_id": case_id, "case_number": case_number},
+                  detail=detail or f"linked TheHive case #{case_number}")
+    logger.info("AUDIT actor=%s action=%s investigation=%s case=%s",
+                actor_username, action, investigation_id, case_number)
+    return link_id
+
+
+def delete_investigation(inv_id: int) -> bool:
+    """Remove an investigation and the human input layered on it (verdict reviews,
+    triage feedback), in one transaction. The write-once trigger only blocks UPDATE,
+    so DELETE is allowed; the two child tables have no ON DELETE CASCADE, so they are
+    cleared first. The alert's semantic-memory row is deliberately left alone — it is
+    shared SOC knowledge, and is removable on its own from the memory browser.
+    The audit row is written by the caller BEFORE this runs (no unaudited deletes)."""
+    with get_pool().connection() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM verdict_reviews WHERE investigation_id = %s", (inv_id,))
+        cur.execute("DELETE FROM triage_feedback WHERE investigation_id = %s", (inv_id,))
+        cur.execute("DELETE FROM investigation_case_links WHERE investigation_id = %s", (inv_id,))
+        cur.execute("DELETE FROM alert_investigations WHERE id = %s", (inv_id,))
+        return cur.rowcount > 0
+
+
+def delete_investigations(inv_ids: list[int], *, actor_username: str) -> list[int]:
+    """Delete several investigations in ONE transaction, with ONE audit row each.
+
+    Bulk is not an excuse to audit less: a 20-row delete produces 20 audit rows, each
+    naming what was destroyed, exactly as if the analyst had deleted them one by one.
+    Audit rows are written on the same cursor as the deletes, so either every row and
+    its audit commit, or nothing does. Ids that no longer exist are skipped (another
+    analyst may have deleted them first) — the returned list is what actually went."""
+    if not inv_ids:
+        return []
+    deleted: list[int] = []
+    # Two cursors, ONE connection: the dict cursor reads the rows we are about to
+    # destroy (for the audit `before`), the tuple cursor writes audits + deletes
+    # (_audit_on returns the new id positionally). Same transaction either way.
+    with get_pool().connection() as conn:
+        with conn.cursor(row_factory=dict_row) as read_cur:
+            read_cur.execute(
+                "SELECT id, alert_id, agent_name, source_ip, rule_id, severity_label, "
+                "       triage_action, case_number "
+                "FROM alert_investigations WHERE id = ANY(%s) FOR UPDATE",
+                (inv_ids,),
+            )
+            rows = read_cur.fetchall()
+        if not rows:
+            return []
+        found = [r["id"] for r in rows]
+        with conn.cursor() as cur:
+            for r in rows:
+                _audit_on(cur, actor_username, "investigation_delete", target_type="investigation",
+                          target_id=str(r["id"]),
+                          before={k: v for k, v in r.items() if k != "id"},
+                          detail=f"bulk delete of {len(found)} investigation(s) from the triage queue")
+                deleted.append(r["id"])
+            cur.execute("DELETE FROM verdict_reviews WHERE investigation_id = ANY(%s)", (found,))
+            cur.execute("DELETE FROM triage_feedback WHERE investigation_id = ANY(%s)", (found,))
+            cur.execute("DELETE FROM investigation_case_links WHERE investigation_id = ANY(%s)", (found,))
+            cur.execute("DELETE FROM alert_investigations WHERE id = ANY(%s)", (found,))
+    logger.info("AUDIT actor=%s action=investigation_delete bulk=%s ids=%s",
+                actor_username, len(deleted), deleted)
+    return deleted
 
 
 # --- reconciliation (memory rows vs investigation rows) ---------------------
@@ -356,8 +481,11 @@ def get_investigation_by_case_number(case_number: int) -> Optional[dict[str, Any
     wins."""
     with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            "SELECT * FROM alert_investigations WHERE case_number = %s "
-            "ORDER BY created_at DESC LIMIT 1",
+            "SELECT ai.*, coalesce(ai.case_id, l.case_id) AS case_id, "
+            "  coalesce(ai.case_number, l.case_number) AS case_number "
+            f"FROM {_QUEUE_FROM} "
+            "WHERE coalesce(ai.case_number, l.case_number) = %s "
+            "ORDER BY ai.created_at DESC LIMIT 1",
             (case_number,),
         )
         return cur.fetchone()
@@ -370,9 +498,9 @@ def search_investigations_by_indicator(indicator: str, *, limit: int = 25) -> li
     like = f"%{indicator}%"
     with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            f"SELECT {_QUEUE_COLS} FROM alert_investigations "
-            "WHERE source_ip = %s OR analysis::text ILIKE %s "
-            "ORDER BY created_at DESC LIMIT %s",
+            f"SELECT {_QUEUE_COLS} FROM {_QUEUE_FROM} "
+            "WHERE ai.source_ip = %s OR ai.analysis::text ILIKE %s "
+            "ORDER BY ai.created_at DESC LIMIT %s",
             (indicator, like, limit),
         )
         return cur.fetchall()

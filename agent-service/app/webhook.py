@@ -109,6 +109,14 @@ def process_alert(payload: dict[str, Any]) -> WebhookResponse:
             case_id=case_info.get("_id"),
             case_number=case_info.get("number"),
             memory_id=memory_id,
+            # A failed case creation is RECORDED, not lost: the error plus the two
+            # inputs needed to replay it (the alert as received, and the enrichment
+            # that went into the case description) let an analyst retry the case
+            # from the investigation page. Written at insert time — the row stays
+            # write-once.
+            case_error=case_info.get("error"),
+            alert_payload=alert.model_dump(mode="json"),
+            enrichment=enrichment,
         )
     except Exception:  # noqa: BLE001 - output-recording must never break ingestion
         # Recording failure must NEVER break ingestion (memory + TheHive already

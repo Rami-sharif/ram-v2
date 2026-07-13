@@ -28,14 +28,35 @@
 </div>
 {% if q %}<p class="muted">Semantic search results (nearest first).</p>{% endif %}
 
+<form method="post" action="/console/memory/bulk-delete" id="bulk-delete"
+      class="bulk-bar" data-bulk-bar hidden>
+  <input type="hidden" name="back" value="{{ request.url.query }}">
+  <span class="bulk-count"><b data-bulk-count>0</b> selected</span>
+  <button type="button" class="btn-cancel-delete" data-bulk-clear>clear</button>
+  <span class="bulk-spacer"></span>
+  <button type="button" class="danger" data-bulk-arm>Delete selected</button>
+  <span class="bulk-confirm" hidden>
+    <span class="bulk-warn">The agent forgets these alerts, including any ground truth you taught it. Cannot be undone.</span>
+    <button type="submit" class="btn-confirm-delete" data-bulk-submit>Delete <b data-bulk-count>0</b></button>
+    <button type="button" class="btn-cancel-delete" data-bulk-disarm>keep</button>
+  </span>
+</form>
+
 <table class="responsive">
   <thead>
-    <tr><th>id</th><th>Time</th><th>Host</th><th>Source IP</th><th>Rule</th>
+    <tr><th class="col-select">
+        <input type="checkbox" data-select-all aria-label="Select every memory on this page">
+      </th>
+      <th>id</th><th>Time</th><th>Host</th><th>Source IP</th><th>Rule</th>
       <th>Severity</th>{% if q %}<th>Sim</th>{% endif %}<th>Identity (alert_text)</th><th></th></tr>
   </thead>
   <tbody>
     {% for m in rows %}
-    <tr>
+    <tr class="row">
+      <td data-label="Select" class="col-select">
+        <input type="checkbox" form="bulk-delete" name="ids" value="{{ m.id }}"
+               data-row-select aria-label="Select memory {{ m.id }}">
+      </td>
       <td data-label="id">{{ m.id }}</td>
       <td data-label="Time" class="nowrap muted">{{ (m.alert_timestamp or m.created_at).strftime('%Y-%m-%d %H:%M') }}</td>
       <td data-label="Host">{{ m.agent_name or '—' }}</td>
@@ -45,10 +66,19 @@
         {% if m.analysis and m.analysis.human_reviewed %}<span class="tag {% if m.analysis.human_action == 'override' %}review-corrected">✎ learned{% else %}review-confirmed">✓ confirmed{% endif %}</span>{% endif %}</td>
       {% if q %}<td data-label="Sim" class="muted">{{ '%.3f'|format(m.similarity) if m.similarity is not none else '—' }}</td>{% endif %}
       <td data-label="Identity" class="mono snippet">{{ (m.alert_text or '')[:90] }}{% if (m.alert_text or '')|length > 90 %}…{% endif %}</td>
-      <td data-label=""><a href="/console/memory/{{ m.id }}">open</a></td>
+      <td data-label="" class="row-actions">
+        <div class="row-actions-inner">
+          <a class="btn-open" href="/console/memory/{{ m.id }}">open<span class="caret" aria-hidden="true">›</span></a>
+        </div>
+      </td>
     </tr>
     {% else %}
-    <tr><td colspan="9" class="muted">No memory rows.</td></tr>
+    <tr><td colspan="{{ 10 if q else 9 }}">
+      <div class="empty-state">
+        <p class="empty-title">No memory rows</p>
+        <p class="muted">The agent writes a memory for every alert it investigates. {% if q or agent_name or source_ip or rule_id %}Nothing matches these filters — <a href="/console/memory">clear them</a>.{% endif %}</p>
+      </div>
+    </td></tr>
     {% endfor %}
   </tbody>
 </table>
