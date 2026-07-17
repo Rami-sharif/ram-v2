@@ -596,6 +596,20 @@ pre.block.err { border-color:var(--bad-bd); color:var(--bad-fg); }
 /* Tool name in a trace entry gets the signal color + mono to stand out as a symbol/identifier. */
 .trace .tool { color:var(--signal); font-weight:640; font-family:var(--mono); }
 .trace .reason { color:var(--ink-dim); font-size:var(--fs-sm); margin:var(--sp-1) 0; }
+/* "Why this verdict" summary card: a subtle signal-accented rail marks it as the at-a-glance
+   read, distinct from the neutral cards around it. Additive to the existing tool-call trace. */
+.why-verdict { border-left:2px solid var(--signal); }
+.why-verdict p { margin:var(--sp-2) 0; }
+/* Top-precedents list: no bullets, each row a linked memory id + weight tag + one-line reason. */
+.why-mem { list-style:none; margin:var(--sp-1) 0 0; padding:0; }
+.why-mem li { margin:var(--sp-2) 0; padding-left:var(--sp-3); border-left:1px solid var(--line); }
+.why-mem .reason { color:var(--ink-dim); font-size:var(--fs-sm); margin:var(--sp-1) 0 0; }
+/* Weight-type chips, reusing the established status palette: exact-IOC and analyst-corrected
+   carry the signal accent (hard/authoritative), confirmed is the ok-green, unverified stays muted. */
+.tag.wt-exact_ioc { background:var(--signal-glow); color:var(--signal-hi); border-color:rgba(51,207,208,.4); }
+.tag.wt-override  { background:rgba(51,207,208,.1); color:var(--signal); border-color:rgba(51,207,208,.3); }
+.tag.wt-confirmed { background:var(--ok-bg); color:var(--ok-fg); border-color:var(--ok-bd); }
+.tag.wt-unverified { background:var(--panel-3); color:var(--ink-faint); border-color:var(--line); }
 /* Nested/indented content block (e.g. sub-details within a trace entry). */
 .layered { margin:var(--sp-2) 0; padding-left:var(--sp-4); }
 /* Truncates a long text snippet with an ellipsis rather than wrapping/overflowing a cell. */

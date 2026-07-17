@@ -37,8 +37,9 @@ from fastapi import APIRouter, Depends, Form, Query, Request
 #   RedirectResponse - tells the browser "go to this other URL instead"
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-# Domain modules: agent (LLM chat), memory (learned alert store), thehive (case API), triage (dedup/case logic)
-from .. import agent, memory, thehive, triage
+# Domain modules: agent (LLM chat), explain ("why this verdict" summary), memory (learned alert
+# store), thehive (case API), triage (dedup/case logic)
+from .. import agent, explain, memory, thehive, triage
 from ..config import get_settings  # app settings, e.g. TheHive public URL for building links
 from . import store  # console-local persistence: investigations, audit log, chat, conversations
 from .auth import require_analyst  # dependency that enforces session auth and yields the analyst
@@ -201,12 +202,20 @@ def investigation_detail(
     parent_case = None if inv.get("case_id") else triage.parent_case_for(inv)  # only look up if not already linked
     if parent_case:
         parent_case = {**parent_case, "url": _case_url(parent_case["case_id"])}  # add a link for the recovery UI
+    # "Why this verdict" summary: prefers the explanation stored at insert time; for older
+    # (write-once) investigations that predate it, recomputes a best-effort one at render time.
+    # Never let a summary failure take down the detail page.
+    try:
+        explanation = explain.build_explanation_from_record(inv)
+    except Exception:  # noqa: BLE001 - presentational only
+        logger.exception("Explanation render failed for investigation %s", inv_id)
+        explanation = None
     return templates.TemplateResponse(request, "investigation.html", {
         "analyst": analyst, "nav": "queue", "msg": request.query_params.get("msg"),
         "err": request.query_params.get("err"), "retrieved": retrieved,
         "severity_labels": SEVERITY_LABELS, "close_statuses": thehive.CLOSED_STATUSES,
         "chat_context": _chat_context(inv),
-        "parent_case": parent_case,
+        "parent_case": parent_case, "explanation": explanation,
         "can_retry_case": parent_case is None and triage.can_retry_case(inv),
         **rec,  # spreads in "inv", "reviews", "feedback" (whatever store.get_investigation returns)
     })
