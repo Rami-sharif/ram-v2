@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block title %}Metrics · RAM v2{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>Metrics</h1>
+  <p class="muted">Read-only operational view over recorded investigations. Nothing on this page modifies data.</p>
+</div>
+
+<!-- Time-window selector: each links back to this page with a different ?window= value -->
+<div class="metric-windows">
+  <span class="muted">window:</span>
+  {% for w in windows %}
+    <a href="/console/metrics?window={{ w }}" class="tag{% if w == window %} wt-override{% endif %}">{{ w }}</a>
+  {% endfor %}
+</div>
+
+<!-- Top-line counters -->
+<section class="summary-grid" aria-label="At a glance">
+  <div class="summary-card">
+    <span class="summary-label">Alerts recorded</span>
+    <strong>{{ summary.total }}</strong>
+    <span class="muted">in this window</span>
+  </div>
+  <div class="summary-card">
+    <span class="summary-label">Investigations run</span>
+    <strong>{{ summary.investigations }}</strong>
+    <span class="muted">agent actually invoked</span>
+  </div>
+  <div class="summary-card">
+    <span class="summary-label">Dedup-gate skips</span>
+    <strong>{{ summary.gated }}</strong>
+    <span class="muted">{% if summary.gate_rate_pct is not none %}{{ summary.gate_rate_pct }}% of alerts — no Gemini call{% else %}—{% endif %}</span>
+  </div>
+  <div class="summary-card">
+    <span class="summary-label">Rule-based fallbacks</span>
+    <strong>{{ summary.fallbacks }}</strong>
+    <span class="muted">{% if summary.fallback_rate_pct is not none %}{{ summary.fallback_rate_pct }}% of investigations{% else %}—{% endif %}</span>
+  </div>
+</section>
+
+<!-- Investigation latency -->
+<h2>Investigation latency <span class="muted note">(real investigations with timing, n={{ latency.n }})</span></h2>
+<section class="card metric-stats">
+  <div class="metric-stat">
+    <span class="metric-num">{% if latency.p50_ms is not none %}{{ latency.p50_ms }}<small>ms</small>{% else %}—{% endif %}</span>
+    <span class="muted">p50</span>
+  </div>
+  <div class="metric-stat">
+    <span class="metric-num">{% if latency.p95_ms is not none %}{{ latency.p95_ms }}<small>ms</small>{% else %}—{% endif %}</span>
+    <span class="muted">p95</span>
+  </div>
+  <div class="metric-stat">
+    <span class="metric-num">{% if latency.max_ms is not none %}{{ latency.max_ms }}<small>ms</small>{% else %}—{% endif %}</span>
+    <span class="muted">max</span>
+  </div>
+</section>
+
+<!-- Tool-call iteration distribution + cap hits -->
+<h2>Tool-call iterations <span class="muted note">per investigation — agent cap is {{ iterations.cap }}</span></h2>
+<section class="card">
+  {% if iterations.distribution %}
+  <ul class="dist">
+    {% for d in iterations.distribution %}
+    <li>
+      <span class="dist-key">{{ d.steps }} call{{ 's' if d.steps != 1 }}</span>
+      <span class="dist-bar"><span style="width: {{ (d.n / iter_max * 100) | round }}%"></span></span>
+      <span class="dist-n muted">{{ d.n }}</span>
+    </li>
+    {% endfor %}
+  </ul>
+  <p class="muted">Reached the iteration cap ({{ iterations.cap }}):
+    <strong{% if iterations.cap_hits %} class="warn"{% endif %}>{{ iterations.cap_hits }}</strong> investigation(s).</p>
+  {% else %}
+  <p class="muted">No investigations in this window.</p>
+  {% endif %}
+</section>
+
+<!-- Tool-call reliability by tool -->
+<h2>Tool-call reliability <span class="muted note">by tool</span></h2>
+<section class="card">
+  {% if tool_failures %}
+  <table class="metric-table">
+    <thead><tr><th>Tool</th><th>Calls</th><th>Failures</th><th>Fail rate</th></tr></thead>
+    <tbody>
+      {% for t in tool_failures %}
+      <tr>
+        <td><code class="tool">{{ t.tool }}</code></td>
+        <td>{{ t.calls }}</td>
+        <td>{{ t.failures }}</td>
+        <td>{% if t.failures %}<span class="sev sev-high">{{ t.fail_pct }}%</span>{% else %}<span class="muted">0%</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No tool calls recorded in this window.</p>
+  {% endif %}
+</section>
+{% endblock %}

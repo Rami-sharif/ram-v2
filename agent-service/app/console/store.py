@@ -95,6 +95,7 @@ def record_investigation(
     attack_type, analysis, tool_trace, memory_context, retrieved_ids,
     triage_action, triage_branch, occurrence_count, suppressed, case_id, case_number,
     memory_id=None, case_error=None, alert_payload=None, enrichment=None,
+    duration_ms=None,
 ) -> int:
     """Insert the agent's output for one alert. Write-once: the row is never
     UPDATEd (DB trigger enforces this). Human input lives in separate tables.
@@ -112,8 +113,8 @@ def record_investigation(
             " alert_id, agent_name, source_ip, rule_id, severity_score, severity_label,"
             " attack_type, analysis, tool_trace, memory_context, retrieved_ids,"
             " triage_action, triage_branch, occurrence_count, suppressed, case_id, case_number,"
-            " memory_id, case_error, alert_payload, enrichment"
-            ") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+            " memory_id, case_error, alert_payload, enrichment, duration_ms"
+            ") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
             (alert_id, agent_name, source_ip, rule_id, severity_score, severity_label,
              attack_type, Json(analysis), Json(tool_trace), memory_context,
              # retrieved_ids is optional; only wrap in Json when actually provided
@@ -122,7 +123,8 @@ def record_investigation(
              memory_id, case_error,
              # alert_payload/enrichment are also optional replay/debug data
              Json(alert_payload) if alert_payload is not None else None,
-             Json(enrichment) if enrichment is not None else None),
+             Json(enrichment) if enrichment is not None else None,
+             duration_ms),  # wall-clock ms for the metrics dashboard (nullable)
         )
         return cur.fetchone()[0]  # the new investigation row's id
 
@@ -329,6 +331,131 @@ def agent_accuracy() -> dict[str, Any]:
     }
 
 
+# --- metrics dashboard (read-only aggregates over the write-once record) ------
+# All SELECT-only, over existing tables — no writes anywhere. Powers GET /console/metrics.
+# window_hours=None means "all time". Gated duplicates (analysis.gate_deduped, from the
+# Part A pre-agent gate) are EXCLUDED from agent-behaviour metrics — they never ran the
+# agent — but counted for the gate hit rate. "Real" = an investigation the agent actually ran.
+_REAL = "coalesce((ai.analysis->>'gate_deduped')::boolean, false) = false"
+_GATED = "(ai.analysis->>'gate_deduped')::boolean is true"
+
+
+def _window_clause(window_hours: Optional[float]) -> tuple[str, list]:
+    """SQL fragment + params restricting alert_investigations (alias ai) to a recent window,
+    or ('', []) for all-time. Kept separate so every metric applies the window identically."""
+    if window_hours is None:
+        return "", []
+    return "ai.created_at >= now() - (%s * interval '1 hour')", [window_hours]
+
+
+def metrics_summary(window_hours: Optional[float] = None) -> dict[str, Any]:
+    """Top-line counts for the window: total alerts recorded, how many the dedup gate skipped
+    (+ rate), how many real investigations ran, and how many fell back to the rule-based
+    analysis (+ rate). One pass over the table."""
+    wc, params = _window_clause(window_hours)
+    where = f"WHERE {wc}" if wc else ""
+    with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT count(*) AS total, "
+            f" count(*) FILTER (WHERE {_GATED}) AS gated, "
+            f" count(*) FILTER (WHERE {_REAL}) AS investigations, "
+            # rule-based fallback is identifiable by the fixed summary string set in agent.py
+            f" count(*) FILTER (WHERE {_REAL} AND ai.analysis->>'summary' "
+            "   LIKE 'Auto-generated fallback%%') AS fallbacks "
+            f"FROM alert_investigations ai {where}",
+            params,
+        )
+        row = cur.fetchone()
+    total, gated = int(row["total"] or 0), int(row["gated"] or 0)
+    inv, fb = int(row["investigations"] or 0), int(row["fallbacks"] or 0)
+    return {
+        "total": total, "gated": gated, "investigations": inv, "fallbacks": fb,
+        # None (not 0) when there's no data, so the template can show "—" instead of a fake 0%
+        "gate_rate_pct": round(gated / total * 100) if total else None,
+        "fallback_rate_pct": round(fb / inv * 100) if inv else None,
+    }
+
+
+def metrics_latency(window_hours: Optional[float] = None) -> dict[str, Any]:
+    """p50/p95/max investigation latency (ms) over REAL investigations that recorded a
+    duration. Gated duplicates and pre-instrumentation rows (duration_ms NULL) are excluded."""
+    wc, params = _window_clause(window_hours)
+    conds = [_REAL, "ai.duration_ms IS NOT NULL"]
+    if wc:
+        conds.append(wc)
+    where = "WHERE " + " AND ".join(conds)
+    with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY ai.duration_ms) AS p50, "
+            "  percentile_cont(0.95) WITHIN GROUP (ORDER BY ai.duration_ms) AS p95, "
+            "  max(ai.duration_ms) AS max_ms, count(*) AS n "
+            f"FROM alert_investigations ai {where}",
+            params,
+        )
+        row = cur.fetchone()
+    return {
+        "p50_ms": int(row["p50"]) if row["p50"] is not None else None,
+        "p95_ms": int(row["p95"]) if row["p95"] is not None else None,
+        "max_ms": int(row["max_ms"]) if row["max_ms"] is not None else None,
+        "n": int(row["n"] or 0),
+    }
+
+
+def metrics_iterations(window_hours: Optional[float] = None, cap: int = 8) -> dict[str, Any]:
+    """Tool-call-count distribution across real investigations, plus how many reached the
+    agent iteration cap (a sign the loop is running out of room). tool_trace records one
+    entry per tool call, so its length is the tool-call count and the max 'iteration' its
+    depth."""
+    wc, params = _window_clause(window_hours)
+    conds = [_REAL]
+    if wc:
+        conds.append(wc)
+    where = "WHERE " + " AND ".join(conds)
+    with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT jsonb_array_length(ai.tool_trace) AS steps, count(*) AS n "
+            f"FROM alert_investigations ai {where} GROUP BY 1 ORDER BY 1",
+            params,
+        )
+        dist = cur.fetchall()
+        # cap-hit = the deepest tool call in the trace reached the configured iteration cap
+        cur.execute(
+            "SELECT count(*) AS cap_hits FROM alert_investigations ai "
+            f"{where} AND (SELECT max((s->>'iteration')::int) "
+            "  FROM jsonb_array_elements(ai.tool_trace) s) >= %s",
+            params + [cap],
+        )
+        cap_hits = int(cur.fetchone()["cap_hits"] or 0)
+    return {
+        "distribution": [{"steps": int(r["steps"]), "n": int(r["n"])} for r in dist],
+        "cap_hits": cap_hits, "cap": cap,
+    }
+
+
+def metrics_tool_failures(window_hours: Optional[float] = None) -> list[dict[str, Any]]:
+    """Per-tool call volume and failure rate across real investigations, most-failing first.
+    Unnests tool_trace (one row per tool call) and counts entries carrying an error."""
+    wc, params = _window_clause(window_hours)
+    conds = [_REAL]
+    if wc:
+        conds.append(wc)
+    where = "WHERE " + " AND ".join(conds)
+    with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT s->>'tool' AS tool, count(*) AS calls, "
+            "  count(*) FILTER (WHERE s->>'error' IS NOT NULL AND s->>'error' <> '') AS failures "
+            "FROM alert_investigations ai, jsonb_array_elements(ai.tool_trace) s "
+            f"{where} GROUP BY 1 ORDER BY failures DESC, calls DESC",
+            params,
+        )
+        rows = cur.fetchall()
+    return [
+        {"tool": r["tool"], "calls": int(r["calls"]), "failures": int(r["failures"]),
+         "fail_pct": round(int(r["failures"]) / int(r["calls"]) * 100) if r["calls"] else 0}
+        for r in rows
+    ]
+
+
 def _humanize_gap(delta) -> str:
     """A short human phrase for the time between two correlated alerts."""
     if delta is None:
@@ -458,6 +585,37 @@ def needs_attention(limit: int = 8) -> list[dict[str, Any]]:
             (limit,),
         )
         return cur.fetchall()
+
+
+def find_recent_investigation_by_identity(*, agent_name, rule_id, source_ip,
+                                          within_minutes: float):
+    """Most recent REAL investigation matching this alert's identity (host + rule + source
+    IP) within a recent window — the lookup behind the pre-agent dedup gate. SELECT-only, so
+    the write-once record is never touched.
+
+    Requires a source_ip (no discriminator ⇒ no gate, mirroring triage's no-false-merge rule).
+    Rows that are THEMSELVES gated duplicates are excluded as anchors, so a burst of duplicates
+    all resolve to the one real investigation that produced the verdict, never to each other.
+    Returns the row with its verdict fields and resolved case, or None."""
+    if not source_ip:
+        return None  # no usable discriminator — caller proceeds to a full investigation
+    with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT ai.id, ai.severity_score, ai.severity_label, ai.attack_type, ai.analysis, "
+            "  ai.triage_branch, ai.created_at, "
+            "  coalesce(ai.case_id, l.case_id) AS case_id, "
+            "  coalesce(ai.case_number, l.case_number) AS case_number "
+            f"FROM {_QUEUE_FROM} "
+            # exact host + source IP; IS NOT DISTINCT FROM makes a NULL rule_id match a NULL rule_id
+            "WHERE ai.agent_name = %s AND ai.rule_id IS NOT DISTINCT FROM %s "
+            "  AND ai.source_ip = %s "
+            "  AND ai.created_at >= now() - (%s * interval '1 minute') "
+            # never anchor to another gated duplicate — only real (agent-run) investigations
+            "  AND coalesce((ai.analysis->>'gate_deduped')::boolean, false) = false "
+            "ORDER BY ai.created_at DESC LIMIT 1",  # the most recent matching investigation
+            (agent_name, rule_id, source_ip, within_minutes),
+        )
+        return cur.fetchone()  # None if nothing matched within the window
 
 
 def get_investigation(inv_id: int):

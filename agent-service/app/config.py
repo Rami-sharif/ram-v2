@@ -155,6 +155,16 @@ class Settings(BaseSettings):
     triage_dedup_window_hours: float = 6.0
     triage_low_create_resolved_case: bool = False  # low: default no case (memory+log only)
 
+    # --- Pre-agent dedup gate (distinct from the post-agent case dedup above) ---
+    # When an identical alert (same host + rule + source IP) was already investigated within
+    # this window, skip the whole agent investigation AND its embedding call: the new alert is
+    # recorded as a lightweight duplicate that reuses the prior verdict. Covers ALL severities
+    # (the triage case-dedup only covers case-creating branches). SELECT-only lookup — the
+    # write-once record is never modified. Shorter than the 6h case window on purpose: it only
+    # catches genuine bursts, so a repeat later still earns a fresh investigation.
+    dedup_gate_enabled: bool = True
+    dedup_gate_window_minutes: float = 5.0
+
     # Derived flag (a @property, see postgres_dsn above): TheHive case creation is
     # considered "on" only when an API key has actually been configured.
     @property
