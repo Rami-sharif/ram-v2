@@ -66,8 +66,9 @@ def _retrieve_memory(alert: WazuhAlert):
         logger.exception("Embedding failed; proceeding without memory")
         return None, [], default_ctx
     try:
-        # Look up prior memories for this host using the freshly computed embedding.
-        memories = memory.retrieve(alert.agent.name or "unknown", embedding)
+        # Look up prior memories for this host using the freshly computed embedding. Pass the
+        # alert so the hybrid exact-match (IOC) layer can find cross-host indicator matches.
+        memories = memory.retrieve(alert.agent.name or "unknown", embedding, alert=alert)
     except Exception:  # noqa: BLE001
         # Retrieval failures still allow the embedding to be reused for write-back later.
         logger.exception("Memory retrieval failed; proceeding without prior context")
