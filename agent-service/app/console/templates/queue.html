@@ -1,113 +1,169 @@
+<!-- Inherit the shared console shell from base.html -->
 {% extends "base.html" %}
-{% block title %}Triage queue · RAM v2{% endblock %}
+<!-- Browser tab title for the triage queue page -->
+{% block title %}Alert queue · RAM v2{% endblock %}
+<!-- Main page content -->
 {% block content %}
 <div class="page-head">
+  <!-- Status readout summarizing the current filter/view state -->
   <div class="readout">
+    <!-- Show the active severity filter, or "all severities" if none is set -->
     <span>focus <b>{% if severity %}{{ severity }}{% else %}all severities{% endif %}</b></span>
-    <span>queue <b>{% if action %}{{ action }}{% elif show_all %}all{% else %}actionable{% endif %}</b></span>
+    <!-- Show the active triage-action filter, whether showing all records, or default "actionable" -->
+    <span>queue <b>{% if action %}{{ action | action_label }}{% elif show_all %}all{% else %}needs action{% endif %}</b></span>
+    <!-- Total matching record count -->
     <span>showing <b>{{ total }} record(s)</b></span>
   </div>
-  <h1>Triage queue</h1>
-  <p class="muted">The highest-signal alerts first. Open any row for the full context trail.</p>
+  <!-- Page heading -->
+  <h1>Alert queue</h1>
+  <!-- Explanatory copy -->
+  <p class="muted">The most important alerts first. Open any row to see the full details.</p>
 </div>
 
 <div class="filters-bar">
+  <!-- GET filter form; params round-trip through the URL for shareable/bookmarkable filtered views -->
   <form class="filters" method="get" action="/console/queue">
+    <!-- Free-text search across alert id / host / source ip -->
     <input type="text" name="q" value="{{ q }}" placeholder="Search alert id / host / source ip">
+    <!-- Severity dropdown, populated from the server-provided list of valid severity labels -->
     <select name="severity">
       <option value="">any severity</option>
+      <!-- One option per known severity label; "selected" marks the currently active filter -->
       {% for s in severity_labels %}
         <option value="{{ s }}" {% if s == severity %}selected{% endif %}>{{ s }}</option>
       {% endfor %}
     </select>
+    <!-- Triage-action dropdown, populated from the server-provided list of possible triage actions -->
     <select name="action">
-      <option value="">any triage action</option>
+      <option value="">any action</option>
       {% for a in triage_actions %}
-        <option value="{{ a }}" {% if a == action %}selected{% endif %}>{{ a }}</option>
+        <option value="{{ a }}" {% if a == action %}selected{% endif %}>{{ a | action_label }}</option>
       {% endfor %}
     </select>
+    <!-- Preserve "show all" (including resolved) across filter submissions -->
     {% if show_all %}<input type="hidden" name="show" value="all">{% endif %}
     <button type="submit">Filter</button>
+    <!-- Reset all filters -->
     <a class="muted" href="/console/queue">reset</a>
   </form>
   <div class="quick-filters">
+    <!-- Shortcut chip: jump straight to high-severity items -->
     <a class="chip" href="/console/queue?severity=high">high priority</a>
+    <!-- Shortcut chip: jump straight to flagged-for-review items -->
     <a class="chip" href="/console/queue?action=create_flagged">flagged</a>
+    <!-- Shortcut chip: jump straight to suppressed-duplicate items -->
     <a class="chip" href="/console/queue?action=suppress_duplicate">duplicates</a>
+    <!-- Toggle between "actionable only" (default) and "show resolved too" (show_all), preserving
+         the other active filters in either direction -->
     {% if show_all %}
-      <a class="chip chip-on" href="/console/queue?{{ {'q': q, 'severity': severity, 'action': action} | urlencode }}">actionable only</a>
+      <a class="chip chip-on" href="/console/queue?{{ {'q': q, 'severity': severity, 'action': action} | urlencode }}">needs action only</a>
     {% else %}
-      <a class="chip" href="/console/queue?{{ {'q': q, 'severity': severity, 'action': action, 'show': 'all'} | urlencode }}">show resolved</a>
+      <a class="chip" href="/console/queue?{{ {'q': q, 'severity': severity, 'action': action, 'show': 'all'} | urlencode }}">show closed too</a>
     {% endif %}
   </div>
 </div>
 
 {# The bulk form lives OUTSIDE the table: row checkboxes join it via form="bulk-delete"
    (nesting it around rows that already contain a delete form would be invalid HTML). #}
+<!-- Bulk-delete form for selected investigations -->
 <form method="post" action="/console/investigations/bulk-delete" id="bulk-delete"
       class="bulk-bar" data-bulk-bar hidden>
+  <!-- Preserve the current query string so the post-delete redirect returns to the same filtered view -->
   <input type="hidden" name="back" value="{{ request.url.query }}">
+  <!-- Live selected-row counter, updated by console.js -->
   <span class="bulk-count"><b data-bulk-count>0</b> selected</span>
+  <!-- Clears the current selection -->
   <button type="button" class="btn-cancel-delete" data-bulk-clear>clear</button>
   <span class="bulk-spacer"></span>
+  <!-- Arms the confirmation step -->
   <button type="button" class="danger" data-bulk-arm>Delete selected</button>
+  <!-- Confirmation sub-panel, hidden until armed -->
   <span class="bulk-confirm" hidden>
-    <span class="bulk-warn">Removes the agent output and any verdict or feedback recorded on them. Cannot be undone.</span>
+    <!-- Warning that deleting removes the agent's output and any recorded verdict/feedback -->
+    <span class="bulk-warn">Removes the agent's result and any decision or feedback saved on them. Cannot be undone.</span>
+    <!-- Final submit that performs the bulk delete -->
     <button type="submit" class="btn-confirm-delete" data-bulk-submit>Delete <b data-bulk-count>0</b></button>
+    <!-- Cancels the armed state -->
     <button type="button" class="btn-cancel-delete" data-bulk-disarm>keep</button>
   </span>
 </form>
 
+<!-- Main queue table; "responsive" enables the data-label mobile stacking layout -->
 <table class="responsive">
   <thead>
     <tr>
       <th class="col-select">
+        <!-- Select-all checkbox for bulk operations -->
         <input type="checkbox" data-select-all aria-label="Select every alert on this page">
       </th>
+      <!-- Static column headers -->
       <th>Time</th><th>Severity</th><th>Attack type</th><th>Host</th>
-      <th>Source IP</th><th>Rule</th><th>Triage</th><th>Review</th><th>Seen</th><th>Case</th><th></th>
+      <th>Source IP</th><th>Rule</th><th>Action</th><th>Review</th><th>Seen</th><th>Case</th><th></th>
     </tr>
   </thead>
   <tbody>
+    <!-- Iterate every matching investigation row; the for-loop's else branch handles the empty-result case -->
     {% for r in rows %}
+    <!-- Row colored by severity; data-href lets console.js make the whole row clickable -->
     <tr class="row sev-row-{{ r.severity_label }}" data-href="/console/investigations/{{ r.id }}">
+      <!-- Per-row checkbox, joined to the external bulk-delete form -->
       <td data-label="Select" class="col-select">
         <input type="checkbox" form="bulk-delete" name="ids" value="{{ r.id }}"
                data-row-select aria-label="Select investigation {{ r.id }}">
       </td>
+      <!-- Alert creation timestamp -->
       <td data-label="Time" class="nowrap muted">{{ r.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+      <!-- Severity badge plus raw numeric score -->
       <td data-label="Severity"><span class="sev sev-{{ r.severity_label }}">{{ r.severity_label }}</span>
           <span class="muted">{{ r.severity_score }}</span></td>
+      <!-- Attack type classification, dash fallback -->
       <td data-label="Attack type">{{ r.attack_type or '—' }}</td>
+      <!-- Host/agent name, dash fallback -->
       <td data-label="Host">{{ r.agent_name or '—' }}</td>
+      <!-- Source IP, click-to-copy span when present -->
       <td data-label="Source IP" class="mono">{% if r.source_ip %}<span class="copyable" data-copy="{{ r.source_ip }}" title="click to copy">{{ r.source_ip }}</span>{% else %}—{% endif %}</td>
+      <!-- Detection rule id -->
       <td data-label="Rule" class="mono">{{ r.rule_id or '—' }}</td>
-      <td data-label="Triage"><span class="tag">{{ r.triage_action or '—' }}</span>
-          {% if r.suppressed %}<span class="tag tag-mute">suppressed</span>{% endif %}</td>
+      <!-- Triage action tag, plus a "duplicate" tag if this alert was deduplicated -->
+      <td data-label="Action"><span class="tag">{{ r.triage_action | action_label }}</span>
+          {% if r.suppressed %}<span class="tag tag-mute">duplicate</span>{% endif %}</td>
+      <!-- Review status: confirmed, corrected/overridden, or unreviewed -->
       <td data-label="Review">
         {% if r.review_status == 'confirmed' or r.review_status == 'confirm' %}<span class="tag review-confirmed">✓ confirmed</span>
         {% elif r.review_status == 'override' %}<span class="tag review-corrected">✎ corrected</span>
         {% else %}<span class="muted">unreviewed</span>{% endif %}</td>
+      <!-- Occurrence count (how many times this alert pattern was seen), dash if only seen once/unknown -->
       <td data-label="Seen">{% if r.occurrence_count %}×{{ r.occurrence_count }}{% else %}—{% endif %}</td>
+      <!-- Case column: shows the case number if any, an external link icon if a case URL exists,
+           or a "no case" warning link (to fix it on the detail page) if triage tried to create one
+           but it's missing, otherwise a dash -->
       <td data-label="Case">{% if r.case_number %}<span class="copyable" data-copy="{{ r.case_number }}" title="click to copy case number">#{{ r.case_number }}</span>{% endif %}
           {% if r.case_url %}<a href="{{ r.case_url }}" target="_blank" rel="noopener">↗</a>
           {% elif r.triage_action in ('create_flagged', 'create_open', 'suppress_duplicate') %}
             <a class="tag tag-bad" href="/console/investigations/{{ r.id }}"
-               title="{{ r.case_error or 'TheHive case creation failed' }} — open to create the case">no case</a>
+               title="{{ r.case_error or 'Could not make the TheHive case' }} — open to make the case">no case</a>
           {% elif not r.case_number %}—{% endif %}</td>
+      <!-- Row actions: open link + per-row delete (with an inline arm/confirm/cancel sequence) -->
       <td data-label="" class="row-actions">
         <div class="row-actions-inner">
+          <!-- Link to the full investigation detail page -->
           <a class="btn-open" href="/console/investigations/{{ r.id }}">open<span class="caret" aria-hidden="true">›</span></a>
+          <!-- Per-row delete form -->
           <form method="post" action="/console/investigations/{{ r.id }}/delete" class="row-delete">
+            <!-- Preserve current query string for the post-delete redirect -->
             <input type="hidden" name="back" value="{{ request.url.query }}">
+            <!-- Trash icon button; data-arm-delete (JS) reveals the confirm/cancel controls
+                 rather than submitting immediately -->
             <button type="button" class="btn-trash" data-arm-delete
                     title="Delete investigation #{{ r.id }} from the queue"
                     aria-label="Delete investigation {{ r.id }}">
+              <!-- Inline trash-can SVG icon -->
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
                    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14M10 11v6M14 11v6"/>
               </svg>
             </button>
+            <!-- Confirm/cancel controls, hidden until the trash icon arms them -->
             <span class="arm-confirm" hidden>
               <button type="submit" class="btn-confirm-delete">delete</button>
               <button type="button" class="btn-cancel-delete" data-cancel-delete>keep</button>
@@ -116,16 +172,19 @@
         </div>
       </td>
     </tr>
+    <!-- Empty-state row, with different messaging depending on whether "show all" is active -->
     {% else %}
     <tr><td colspan="12">
       <div class="empty-state">
         {% if show_all %}
+        <!-- No investigations exist at all yet -->
         <p class="empty-title">Nothing has come through yet</p>
-        <p class="muted">Investigations appear here the moment Wazuh forwards an alert and the agent finishes triaging it.</p>
+        <p class="muted">Alerts appear here as soon as Wazuh sends one and the agent finishes checking it.</p>
         {% else %}
-        <p class="empty-title">Queue clear — nothing needs an analyst</p>
-        <p class="muted">Every alert has been auto-closed or already reviewed.
-          <a href="/console/queue?show=all">Show resolved</a> to see the full record.</p>
+        <!-- Everything actionable has already been resolved/reviewed -->
+        <p class="empty-title">Queue clear — nothing needs you right now</p>
+        <p class="muted">Every alert has been closed automatically or already reviewed.
+          <a href="/console/queue?show=all">Show closed too</a> to see everything.</p>
         {% endif %}
       </div>
     </td></tr>
@@ -133,12 +192,18 @@
   </tbody>
 </table>
 
+<!-- Pagination controls, only shown when there's more than one page -->
 {% if total_pages > 1 %}
 <nav class="pager">
+  <!-- Build the shared query string (filters only, no page number) for prev/next links -->
   {% set qs = {'q': q, 'severity': severity, 'action': action, 'show': 'all' if show_all else ''} | urlencode %}
+  <!-- Previous-page link, disabled (plain text) on the first page -->
   {% if page > 1 %}<a href="/console/queue?{{ qs }}&page={{ page - 1 }}">← prev</a>{% else %}<span class="muted">← prev</span>{% endif %}
+  <!-- Current page / total pages indicator -->
   <span class="muted">page {{ page }} / {{ total_pages }}</span>
+  <!-- Next-page link, disabled on the last page -->
   {% if page < total_pages %}<a href="/console/queue?{{ qs }}&page={{ page + 1 }}">next →</a>{% else %}<span class="muted">next →</span>{% endif %}
 </nav>
 {% endif %}
+<!-- Close the content block -->
 {% endblock %}

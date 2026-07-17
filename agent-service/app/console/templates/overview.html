@@ -1,83 +1,129 @@
+<!-- Inherit the shared console shell from base.html -->
 {% extends "base.html" %}
+<!-- Browser tab title for the overview/dashboard page -->
 {% block title %}Overview · RAM v2{% endblock %}
+<!-- Main page content -->
 {% block content %}
 <div class="page-head">
+  <!-- Top status readout summarizing the workspace at a glance -->
   <div class="readout">
+    <!-- Total investigations recorded -->
     <span>workspace <b>{{ summary.total }} investigations</b></span>
-    <span>unreviewed high-signal <b>{{ attention | length }}</b></span>
+    <!-- Count of high-signal items still needing analyst review -->
+    <span>not yet reviewed (important) <b>{{ attention | length }}</b></span>
+    <!-- Count of investigations linked to a TheHive case -->
     <span>linked cases <b>{{ summary.linked_cases }}</b></span>
   </div>
+  <!-- Page heading -->
   <h1>Overview</h1>
-  <p class="muted">At-a-glance posture across every recorded investigation. Start with what needs you now, then move into the queue.</p>
+  <!-- Explanatory copy about the purpose of this page -->
+  <p class="muted">A quick look at every alert the agent has checked. Start with what needs you now, then open the queue.</p>
 </div>
 
+<!-- Grid of clickable summary cards, each linking to a pre-filtered queue view -->
 <section class="summary-grid" aria-label="At a glance">
+  <!-- Card linking to the full unfiltered queue -->
   <a class="summary-card" href="/console/queue">
     <span class="summary-label">Open queue</span>
     <strong>{{ summary.total }}</strong>
     <span class="muted">total investigations</span>
   </a>
+  <!-- Card linking to the queue filtered to high/critical severity -->
   <a class="summary-card" href="/console/queue?severity=high">
     <span class="summary-label">High / critical</span>
     <strong>{{ summary.high }}</strong>
     <span class="muted">requires fast attention</span>
   </a>
+  <!-- Card linking to the queue filtered to flagged-for-review triage outcomes -->
   <a class="summary-card" href="/console/queue?action=create_flagged">
-    <span class="summary-label">Flagged for review</span>
+    <span class="summary-label">Flagged urgent</span>
     <strong>{{ summary.flagged }}</strong>
-    <span class="muted">escalated by triage</span>
+    <span class="muted">marked urgent automatically</span>
   </a>
+  <!-- Card linking to the queue filtered to suppressed-duplicate triage outcomes -->
   <a class="summary-card" href="/console/queue?action=suppress_duplicate">
-    <span class="summary-label">Suppressed dupes</span>
+    <span class="summary-label">Merged duplicates</span>
     <strong>{{ summary.suppressed }}</strong>
-    <span class="muted">deduplicated repeats</span>
+    <span class="muted">repeat alerts merged together</span>
   </a>
 </section>
 
-<h2>Agent performance <span class="muted note">how well the agent tracks your judgement (the learning loop)</span></h2>
-<section class="summary-grid" aria-label="Agent performance">
-  <div class="summary-card">
-    <span class="summary-label">Verdict agreement</span>
-    <strong>{% if accuracy.agreement_pct is not none %}{{ accuracy.agreement_pct }}%{% else %}—{% endif %}</strong>
-    <span class="muted">{{ accuracy.confirms }} confirmed · {{ accuracy.overrides }} overridden</span>
+<!-- Section: memory-correlation feed. Shows investigations the agent connected to
+     prior activity via semantic memory — the learning loop made visible. A manual
+     carousel: prev/next arrows page through the cards; each card links to its case. -->
+<div class="corr-head">
+  <h2>Correlated cases <span class="muted note">investigations the agent connected to prior activity in memory — newest first</span></h2>
+  {% if correlated %}
+  <!-- Prev/next controls; console.js scrolls the track by one card. Disabled-state is managed in JS. -->
+  <div class="corr-nav">
+    <button type="button" class="corr-arrow" data-carousel-prev aria-label="previous correlated cases">‹</button>
+    <button type="button" class="corr-arrow" data-carousel-next aria-label="next correlated cases">›</button>
   </div>
-  <div class="summary-card">
-    <span class="summary-label">Triage accuracy</span>
-    <strong>{% if accuracy.triage_pct is not none %}{{ accuracy.triage_pct }}%{% else %}—{% endif %}</strong>
-    <span class="muted">{{ accuracy.triage_correct }} correct · {{ accuracy.triage_incorrect }} incorrect</span>
+  {% endif %}
+</div>
+{% if correlated %}
+<!-- Horizontally scrollable track; each card is a self-contained explanation -->
+<div class="carousel" data-carousel>
+  <div class="carousel-track" data-carousel-track>
+    {% for c in correlated %}
+    <!-- One correlation card: newer (child) case linked to a prior (parent) case -->
+    <article class="corr-card">
+      <!-- Header: the two linked cases, each a clickable link to its investigation -->
+      <div class="corr-card-head">
+        <a class="corr-node" href="/console/investigations/{{ c.child_id }}">
+          <span class="sev sev-{{ c.child_sev }}">{{ c.child_sev }}</span>
+          <span class="corr-node-title">{{ c.child_attack or 'unclassified' }}</span>
+          <span class="muted mono">case #{{ c.child_case or c.child_id }}</span>
+        </a>
+        <span class="corr-arrowmark" title="linked to a prior case">←</span>
+        <a class="corr-node corr-node-parent" href="/console/investigations/{{ c.parent_id }}">
+          <span class="sev sev-{{ c.parent_sev }}">{{ c.parent_sev }}</span>
+          <span class="corr-node-title">{{ c.parent_attack or 'prior alert' }}</span>
+          <span class="muted mono">#{{ c.parent_case or c.parent_id }}</span>
+        </a>
+      </div>
+      <!-- Meta line: host + time gap between the two alerts -->
+      <p class="corr-meta muted mono">{{ c.child_host or '—' }} · {{ c.gap }}</p>
+      <!-- The detailed "why linked" explanation -->
+      <p class="corr-why-label">Why these are linked</p>
+      <ul class="corr-reasons">
+        {% for reason in c.reasons %}<li>{{ reason }}</li>{% endfor %}
+      </ul>
+      <!-- Footer CTA into the newer case -->
+      <a class="corr-open" href="/console/investigations/{{ c.child_id }}">Open case #{{ c.child_case or c.child_id }} →</a>
+    </article>
+    {% endfor %}
   </div>
-  <div class="summary-card">
-    <span class="summary-label">Review coverage</span>
-    <strong>{{ accuracy.coverage_pct }}%</strong>
-    <span class="muted">{{ accuracy.reviewed }} of {{ accuracy.total_investigations }} reviewed</span>
-  </div>
-  <div class="summary-card">
-    <span class="summary-label">Learned corrections</span>
-    <strong>{{ accuracy.learned_memories }}</strong>
-    <span class="muted">memories carrying your ground truth</span>
-  </div>
-</section>
-{% if accuracy.top_corrected %}
-<p class="muted note" style="margin:-0.5rem 0 1.5rem">Most-corrected attack types:
-  {% for t in accuracy.top_corrected %}<span class="tag">{{ t.attack_type or 'unclassified' }} ×{{ t.n }}</span> {% endfor %}
-</p>
+</div>
+{% else %}
+<!-- Empty state: no correlations exist until an alert retrieves a prior related investigation -->
+<p class="muted note" style="margin:-0.5rem 0 1.5rem">No linked cases yet — a link appears once an alert matches an earlier related alert in the agent's memory.</p>
 {% endif %}
 
+<!-- Two-panel layout: "needs attention" list + severity mix/recent activity -->
 <div class="detail-grid">
   <section class="card">
     <div class="panel-head">
       <h2>Needs attention</h2>
+      <!-- Clarifies the filter criteria for this list -->
       <span class="muted note">high / critical or flagged, not yet reviewed</span>
     </div>
+    <!-- Only render the list if there's anything needing attention -->
     {% if attention %}
     <ul class="signal-list">
+      <!-- One row per investigation needing review, colored by severity via sev-row-* class -->
       {% for r in attention %}
       <li class="signal-row sev-row-{{ r.severity_label }}">
+        <!-- Whole row links to the investigation detail page -->
         <a class="signal-main" href="/console/investigations/{{ r.id }}">
+          <!-- Severity badge -->
           <span class="sev sev-{{ r.severity_label }}">{{ r.severity_label }}</span>
+          <!-- Attack type classification, or "unclassified" fallback -->
           <span class="signal-title">{{ r.attack_type or 'unclassified' }}</span>
+          <!-- Host name, monospaced -->
           <span class="muted mono">{{ r.agent_name or '—' }}</span>
         </a>
+        <!-- Case number (if linked) and creation timestamp -->
         <span class="signal-meta muted">
           {% if r.case_number %}#{{ r.case_number }} · {% endif %}{{ r.created_at.strftime('%m-%d %H:%M') }}
         </span>
@@ -85,33 +131,42 @@
       {% endfor %}
     </ul>
     {% else %}
-    <p class="muted">Nothing outstanding — every high-signal alert has been reviewed.</p>
+    <!-- Empty state: nothing currently needs attention -->
+    <p class="muted">Nothing outstanding — every important alert has been reviewed.</p>
     {% endif %}
   </section>
 
   <section class="card">
     <div class="panel-head">
       <h2>Severity mix</h2>
+      <!-- Total investigation count for context -->
       <span class="muted note">{{ summary.total }} total</span>
     </div>
+    <!-- Only render the severity distribution bar if there is distribution data -->
     {% if distribution %}
+    <!-- Horizontal stacked bar visualizing the proportion of each severity level -->
     <div class="sevbar" role="img" aria-label="severity distribution">
+      <!-- One colored segment per severity bucket, width proportional to its share of the total -->
       {% for d in distribution %}
       <span class="sevbar-seg sevseg-{{ d.label }}" style="width:{{ (d.n / dist_total * 100) | round(2) }}%"
             title="{{ d.label }}: {{ d.n }}"></span>
       {% endfor %}
     </div>
+    <!-- Legend mapping each severity color to its label and count -->
     <ul class="sevbar-legend">
       {% for d in distribution %}
       <li><span class="sev sev-{{ d.label }}">{{ d.label }}</span> <strong class="mono">{{ d.n }}</strong></li>
       {% endfor %}
     </ul>
     {% else %}
+    <!-- Empty state: no investigations recorded at all -->
     <p class="muted">No investigations recorded yet.</p>
     {% endif %}
 
+    <!-- Sub-heading for the recent-activity feed -->
     <h3>Recent activity</h3>
     {% if recent %}
+    <!-- Compact variant of the signal list, most-recent investigations regardless of severity -->
     <ul class="signal-list compact">
       {% for r in recent %}
       <li class="signal-row sev-row-{{ r.severity_label }}">
@@ -124,8 +179,10 @@
       {% endfor %}
     </ul>
     {% else %}
+    <!-- Empty state: no recent activity to show -->
     <p class="muted">No recent activity.</p>
     {% endif %}
   </section>
 </div>
+<!-- Close the content block -->
 {% endblock %}

@@ -1,12 +1,21 @@
 # Rendered to index.conf by scripts/render-thehive-config.sh (gitignored output).
+# JanusGraph's search-index configuration, pointing it at the Elasticsearch cluster.
 db.janusgraph.index.search {
+  # Use Elasticsearch as the search-index backend for JanusGraph.
   backend = elasticsearch
+  # Elasticsearch host(s) to connect to; "elasticsearch" is the docker-compose service name.
   hostname = ["elasticsearch"]
+  # Name of the Elasticsearch index JanusGraph will read/write for TheHive's data.
   index-name = thehive
+  # Authentication settings for connecting to Elasticsearch over HTTP.
   elasticsearch.http.auth {
+    # Use HTTP basic auth (username/password) rather than token/cert-based auth.
     type = "basic"
     basic {
+      # Elasticsearch username TheHive authenticates as.
       username = "elastic"
+      # Placeholder substituted at render time with the real Elasticsearch password from .env;
+      # left untouched here — do not replace with a literal secret in this template file.
       password = "###ELASTICSEARCH_PASSWORD###"
     }
   }

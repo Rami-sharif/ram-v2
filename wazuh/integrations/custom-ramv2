@@ -1,18 +1,40 @@
 #!/bin/sh
 # RAM v2 custom integration wrapper — invokes custom-ramv2.py with the Wazuh
 # framework Python (which bundles the `requests` module).
+# Relative path (from WAZUH_PATH) to the Python 3 interpreter bundled with
+# the Wazuh manager/framework install, guaranteed to already have the
+# `requests` library available (unlike the system python3).
 WPYTHON_BIN="framework/python/bin/python3"
+# Capture how this script was invoked ($0), including whatever path the
+# integrator daemon used to call it, so we can locate our own directory.
 SCRIPT_PATH_NAME="$0"
+# Resolve the absolute, canonical directory this script lives in by cd-ing
+# into its dirname and printing the physical (symlink-resolved) working
+# directory via `pwd -P`.
 DIR_NAME="$(cd $(dirname ${SCRIPT_PATH_NAME}); pwd -P)"
+# Extract just the filename portion (e.g. "custom-ramv2") so we can derive
+# the matching ".py" script name below.
 SCRIPT_NAME="$(basename ${SCRIPT_PATH_NAME})"
 
+# Only proceed with setup when this script is actually running from a
+# Wazuh "integrations" directory (the expected install location); anything
+# else falls through with no case matched and no WAZUH_PATH/PYTHON_SCRIPT
+# set.
 case ${DIR_NAME} in
     */integrations)
+        # Respect an already-exported WAZUH_PATH (e.g. set by the
+        # integrator daemon); only derive it ourselves if it's unset.
         if [ -z "${WAZUH_PATH}" ]; then
+            # The Wazuh install root is one directory above "integrations".
             WAZUH_PATH="$(cd ${DIR_NAME}/..; pwd)"
         fi
+        # Full path to the companion Python implementation
+        # (custom-ramv2.py) that does the actual alert forwarding work.
         PYTHON_SCRIPT="${DIR_NAME}/${SCRIPT_NAME}.py"
     ;;
 esac
 
+# Hand off to the bundled Python interpreter, running custom-ramv2.py with
+# all arguments the integrator daemon passed to this wrapper (alert file
+# path, API key, hook URL, etc.) forwarded verbatim via "$@".
 ${WAZUH_PATH}/${WPYTHON_BIN} ${PYTHON_SCRIPT} "$@"

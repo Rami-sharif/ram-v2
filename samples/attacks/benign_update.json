@@ -1,0 +1,17 @@
+{
+  "timestamp": "2026-07-15T03:05:00.000+0000",
+  "id": "1752548700.400002",
+  "location": "/var/log/dpkg.log",
+  "rule": {
+    "level": 3,
+    "description": "System package updated via apt.",
+    "id": "2932",
+    "groups": ["syslog", "package_management"]
+  },
+  "agent": { "id": "012", "name": "app-node-09", "ip": "10.0.0.91" },
+  "data": {
+    "srcuser": "root"
+  },
+  "full_log": "Jul 15 03:05:00 app-node-09 dpkg: status installed openssl:amd64 3.0.13-0ubuntu1",
+  "decoder": { "name": "dpkg" }
+}

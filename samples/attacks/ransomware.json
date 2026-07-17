@@ -1,0 +1,20 @@
+{
+  "timestamp": "2026-07-14T09:30:00.000+0000",
+  "id": "1752481800.300005",
+  "location": "syscheck",
+  "rule": {
+    "level": 15,
+    "description": "Mass file rename with ransomware extension detected.",
+    "id": "100503",
+    "groups": ["syscheck", "malware", "ransomware"],
+    "mitre": { "id": ["T1486"], "tactic": ["Impact"], "technique": ["Data Encrypted for Impact"] }
+  },
+  "agent": { "id": "003", "name": "file-server-02", "ip": "10.0.0.12" },
+  "data": {
+    "file": "/srv/share/finance/Q3_report.xlsx.locked",
+    "md5": "5d41402abc4b2a76b9719d911017c592",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "full_log": "syscheck: 1482 files renamed to *.locked in /srv/share within 60s; ransom note READ_ME_TO_DECRYPT.txt created",
+  "decoder": { "name": "syscheck_integrity_changed" }
+}

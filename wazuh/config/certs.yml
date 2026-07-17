@@ -1,16 +1,37 @@
+# Top-level key consumed by wazuh-certs-generator: it walks each node group
+# below and issues a certificate/key pair (signed by the generated root CA)
+# for every host listed, matching the "name" to the CN and the "ip" to the
+# SAN entry so TLS hostname verification works between containers.
 nodes:
   # Wazuh indexer server nodes
+  # Certificates generated here are mounted into the wazuh-indexer container
+  # and used for both the HTTP REST API and the internal transport layer.
   indexer:
+    # One entry per indexer node; add more list items here to certify a
+    # multi-node indexer cluster.
     - name: wazuh.indexer
+      # "ip" is actually the hostname/IP used as the certificate's SAN value;
+      # it must match the Docker Compose service name so TLS hostname
+      # verification succeeds when other containers connect to it.
       ip: wazuh.indexer
 
   # Wazuh server nodes
   # Use node_type only with more than one Wazuh manager
+  # (single-node deployments, like this one, omit node_type entirely).
   server:
+    # One entry per Wazuh manager node; add more list items here to certify
+    # additional managers in a clustered deployment.
     - name: wazuh.manager
+      # SAN/hostname for the manager's certificate, matching the Compose
+      # service name so filebeat and the dashboard can validate TLS.
       ip: wazuh.manager
 
   # Wazuh dashboard node
+  # Certificate here secures the dashboard's HTTPS listener (server.ssl.*
+  # settings in opensearch_dashboards.yml).
   dashboard:
+    # Single dashboard instance; matches the Compose service name so
+    # browsers/clients connecting via that hostname see a valid cert.
     - name: wazuh.dashboard
+      # SAN/hostname value for the dashboard certificate.
       ip: wazuh.dashboard

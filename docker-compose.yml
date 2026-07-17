@@ -9,84 +9,172 @@
 # Variables come from .env (gitignored). No secrets are inlined here.
 # ============================================================
 
+# Top-level map of all containers that make up the SOC stack: Wazuh
+# (manager/indexer/dashboard) for detection, TheHive (+ Elasticsearch) for
+# case management, Postgres for future semantic memory, and the custom
+# agent-service that investigates alerts end-to-end.
 services:
 
   # ---------------- PostgreSQL + pgvector (Phase 2+, empty now) -------------
+  # Vector-enabled Postgres used as the semantic memory store for the
+  # agent-service (embeddings of past investigations). Provisioned now so
+  # the schema/volume exist, but not yet consumed by Phase 1 logic.
   postgres:
+    # pgvector/pgvector:pg16 bundles the pgvector extension on top of
+    # Postgres 16, so similarity search works out of the box.
     image: pgvector/pgvector:pg16
+    # Fixed, human-readable container name (rather than compose's default
+    # auto-generated name) for easier `docker logs`/`docker exec` targeting.
     container_name: ramv2-postgres
+    # DNS name other containers on the ramnet network use to reach this
+    # service (matches POSTGRES_HOST default in agent-service/app/config.py).
     hostname: postgres
+    # Restart automatically unless an operator explicitly stops it, so the
+    # DB survives host reboots/crashes without manual intervention.
     restart: unless-stopped
     environment:
+      # Superuser/app username to create in the Postgres instance; sourced
+      # from .env so no credentials are hardcoded in this file.
       - POSTGRES_USER=${POSTGRES_USER}
+      # Password for the above user; must be set in .env before first boot.
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      # Default database name created on first boot.
       - POSTGRES_DB=${POSTGRES_DB}
     volumes:
+      # Persist database files on a named volume so data survives container
+      # recreation (e.g. `docker compose up` after an image update).
       - pgdata:/var/lib/postgresql/data
     ports:
+      # Bind only to localhost on the host (127.0.0.1) rather than all
+      # interfaces, since Postgres isn't meant to be reachable from outside
+      # this machine — only from other containers via the ramnet network.
       - "127.0.0.1:5432:5432"
     networks:
+      # Shared internal network so other services (agent-service) can reach
+      # postgres by hostname without exposing it publicly.
       - ramnet
     healthcheck:
+      # Use Postgres's own readiness probe to confirm the DB is accepting
+      # connections for the configured user/database before dependents start.
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      # How often to run the healthcheck once the container is up.
       interval: 10s
+      # How long to wait for the check itself before considering it failed.
       timeout: 5s
+      # Number of consecutive failures allowed before marking unhealthy.
       retries: 5
+      # Grace period after container start before failures count, giving
+      # Postgres time to initialize on first boot.
       start_period: 20s
     deploy:
       resources:
         limits:
+          # Cap memory usage so this lightly-used (Phase 1) service can't
+          # starve the more critical Wazuh/TheHive containers on the host.
           memory: 512M
 
   # ---------------- Elasticsearch (TheHive index, internal) ----------------
+  # Search/index backend that TheHive uses internally for case/alert search;
+  # not queried directly by analysts or the agent-service — it's private
+  # infrastructure for TheHive alone (separate from the Wazuh indexer below).
   elasticsearch:
+    # Pinned Elasticsearch version compatible with TheHive 5.7.1.
     image: elasticsearch:8.19.15
     container_name: ramv2-elasticsearch
     hostname: elasticsearch
     restart: unless-stopped
+    # Run as the host UID but with the elasticsearch group (gid 0/root
+    # group here) so bind-mounted data/log directories owned by the host
+    # user remain writable by the container process.
     user: "${UID}:0"
     environment:
+      # Listen on all interfaces inside the container so other containers
+      # (thehive) can reach it via the ramnet network.
       - http.host=0.0.0.0
+      # Run as a single-node cluster — no need for ES clustering in this
+      # single-host SOC stack.
       - discovery.type=single-node
       - cluster.name=hive
+      # Raise the search thread pool queue size so bursts of TheHive
+      # queries aren't rejected under load.
       - thread_pool.search.queue_size=100000
+      # Raise the write thread pool queue size so bursts of case/alert
+      # writes from TheHive aren't rejected under load.
       - thread_pool.write.queue_size=100000
+      # Lock JVM heap in memory to avoid it being swapped out, which would
+      # badly hurt Elasticsearch performance.
       - bootstrap.memory_lock=true
+      # Enable X-Pack security (authentication) since this ES instance
+      # holds case data and shouldn't be open by default.
       - xpack.security.enabled=true
+      # Password for the built-in "elastic" superuser, sourced from .env;
+      # used by TheHive and the healthcheck below to authenticate.
       - ELASTIC_PASSWORD=${ELASTICSEARCH_PASSWORD}
+      # Fix the JVM min/max heap size to 1GB to keep memory usage
+      # predictable in this resource-constrained, single-host deployment.
       - ES_JAVA_OPTS=-Xms1g -Xmx1g
     volumes:
+      # Persist Elasticsearch's index data on the host so case data survives
+      # container recreation.
       - ./elasticsearch/data:/usr/share/elasticsearch/data
+      # Persist Elasticsearch logs on the host for post-hoc debugging.
       - ./elasticsearch/logs:/usr/share/elasticsearch/logs
     ulimits:
       memlock:
+        # Remove the memlock limit (unlimited) so bootstrap.memory_lock
+        # above can actually pin the JVM heap in RAM.
         soft: -1
         hard: -1
       nofile:
+        # Raise the open-file-descriptor limit, which Elasticsearch needs
+        # for its many index segment files under load.
         soft: 65536
         hard: 65536
     networks:
+      # Internal-only network; no ports are published to the host, so this
+      # service is unreachable from outside the docker network entirely.
       - ramnet
     healthcheck:
+      # Confirm the cluster is up and authenticating correctly by hitting
+      # the health API with the elastic superuser credentials.
       test: ["CMD-SHELL", "curl -f -s -u elastic:${ELASTICSEARCH_PASSWORD} http://localhost:9200/_cat/health || exit 1"]
       interval: 10s
       timeout: 5s
+      # Allow more retries than Postgres since ES/JVM startup is slower.
       retries: 6
+      # Longer grace period than Postgres to account for JVM/ES warm-up.
       start_period: 60s
     deploy:
       resources:
         limits:
+          # JVM-backed services need headroom beyond the 1g heap set above
+          # (JVM overhead, off-heap buffers), hence a higher cap than the
+          # heap size itself.
           memory: 2G
 
   # ---------------- TheHive 5 (BerkeleyDB + Elasticsearch) -----------------
+  # Case management platform: the agent-service opens/updates TheHive cases
+  # for triaged Wazuh alerts, and analysts work those cases from its UI.
   thehive:
+    # StrangeBee's official TheHive 5 image, pinned to a specific patch
+    # version for reproducible deployments.
     image: strangebee/thehive:5.7.1
     container_name: ramv2-thehive
     hostname: thehive
     restart: unless-stopped
+    # Run as the host UID/GID (from .env) so files written under the
+    # bind-mounted config/data/log directories are owned by the host user,
+    # not root, and remain editable/removable outside the container.
     user: "${UID}:${GID}"
+    # Skip TheHive's interactive config generation and secret prompts since
+    # config is supplied via the mounted ./thehive/config directory instead.
     command: ["--no-config", "--no-config-secret"]
     environment:
+      # Multi-line JAVA_OPTS block tuning the embedded JVM: fixed min/max
+      # heap (1280M) to bound memory use, a metaspace cap to prevent
+      # class-metadata growth from consuming unbounded memory, and a
+      # reserved code cache size for JIT-compiled code — all sized for this
+      # single-host deployment rather than left at JVM defaults.
       - |
         JAVA_OPTS=
           -Xms1280M
@@ -94,168 +182,319 @@ services:
           -XX:MaxMetaspaceSize=400m
           -XX:ReservedCodeCacheSize=250m
     volumes:
+      # TheHive application config (read-only — the container shouldn't
+      # modify its own config at runtime).
       - ./thehive/config:/etc/thehive:ro
       - ./thehive/data/files:/opt/thp/thehive/files
+      # Persist TheHive's embedded BerkeleyDB database (cases, alerts,
+      # observables metadata) on the host.
       - ./thehive/data/database:/opt/thp/thehive/database
+      # Persist TheHive application logs on the host for debugging.
       - ./thehive/logs:/var/log/thehive
     ports:
+      # Expose TheHive's UI/API on host port 9000, matching THEHIVE_URL's
+      # internal port and CONSOLE_THEHIVE_PUBLIC_URL used by the console.
       - "9000:9000"
     networks:
       - ramnet
     depends_on:
       elasticsearch:
+        # Wait for Elasticsearch's healthcheck to pass (not just for the
+        # container to start) before starting TheHive, since TheHive fails
+        # to initialize its index if ES isn't actually ready yet.
         condition: service_healthy
     healthcheck:
+      # Poll TheHive's own status API to confirm the app (not just the
+      # container) has finished starting and is serving requests.
       test: ["CMD-SHELL", "curl -s -f http://localhost:9000/thehive/api/status || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 6
+      # Longest grace period in the stack since TheHive must connect to
+      # Elasticsearch and run schema/index setup on first boot.
       start_period: 90s
     deploy:
       resources:
         limits:
+          # Headroom above the 1280M JVM heap for JVM overhead plus
+          # TheHive's non-JVM file/database I/O.
           memory: 2G
 
   # ---------------- Wazuh indexer (OpenSearch) -----------------------------
+  # OpenSearch-based data store that holds Wazuh's alerts/logs. This is what
+  # the agent-service's read-only investigation tools query (see
+  # WAZUH_INDEXER_RO_USER/wazuh_indexer_url in config.py) — distinct from
+  # the Elasticsearch instance above, which is private to TheHive.
   wazuh.indexer:
+    # Official Wazuh indexer image, version-pinned to match wazuh.manager
+    # and wazuh.dashboard below (all three must stay on the same release).
     image: wazuh/wazuh-indexer:4.13.1
     container_name: ramv2-wazuh-indexer
+    # Hostname used by wazuh.manager/wazuh.dashboard/agent-service to reach
+    # this service (matches wazuh_indexer_url default in config.py).
     hostname: wazuh.indexer
+    # Always restart (even after manual stop via reboot), since this is
+    # core detection infrastructure that should self-heal.
     restart: always
     environment:
+      # Fixed JVM heap size for the embedded OpenSearch instance, sized to
+      # this single-host deployment.
       - "OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g"
     ulimits:
       memlock:
+        # Unlimited memlock so OpenSearch can lock its JVM heap in memory
+        # (avoids swapping, same rationale as the elasticsearch service).
         soft: -1
         hard: -1
       nofile:
+        # Higher open-file limit for OpenSearch's index segment files.
         soft: 65536
         hard: 65536
     ports:
+      # Publish the indexer's HTTPS API on the host, allowing the
+      # agent-service (and any external tooling) to query it directly.
       - "9200:9200"
     volumes:
+      # Persist indexed alert/log data across container restarts.
       - wazuh-indexer-data:/var/lib/wazuh-indexer
+      # TLS trust root shared across the Wazuh components; also mounted
+      # read-only into agent-service so it can verify this indexer's cert.
       - ./wazuh/config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/certs/root-ca.pem
+      # This node's private key, used to terminate TLS for the indexer API.
       - ./wazuh/config/wazuh_indexer_ssl_certs/wazuh.indexer-key.pem:/usr/share/wazuh-indexer/certs/wazuh.indexer.key
+      # This node's TLS certificate, presented to clients connecting over HTTPS.
       - ./wazuh/config/wazuh_indexer_ssl_certs/wazuh.indexer.pem:/usr/share/wazuh-indexer/certs/wazuh.indexer.pem
+      # Admin certificate used for privileged OpenSearch security-plugin
+      # administration actions (e.g. reloading internal_users.yml).
       - ./wazuh/config/wazuh_indexer_ssl_certs/admin.pem:/usr/share/wazuh-indexer/certs/admin.pem
+      # Private key paired with the admin certificate above.
       - ./wazuh/config/wazuh_indexer_ssl_certs/admin-key.pem:/usr/share/wazuh-indexer/certs/admin-key.pem
+      # Main OpenSearch configuration file (cluster/network/security settings).
       - ./wazuh/config/wazuh_indexer/wazuh.indexer.yml:/usr/share/wazuh-indexer/opensearch.yml
+      # Internal user/role definitions for the security plugin — this is
+      # where accounts like the read-only investigation user are defined.
       - ./wazuh/config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/opensearch-security/internal_users.yml
     networks:
       - ramnet
     deploy:
       resources:
         limits:
+          # Headroom above the 1g heap for JVM overhead, matching the
+          # pattern used for the other JVM-based services.
           memory: 2G
 
   # ---------------- Wazuh manager ------------------------------------------
+  # The core Wazuh engine: receives agent/syslog events, evaluates detection
+  # rules, generates alerts, ships them to wazuh.indexer via Filebeat, and
+  # invokes the custom-ramv2 integration script to notify agent-service.
   wazuh.manager:
+    # Official Wazuh manager image, version-matched to the indexer/dashboard.
     image: wazuh/wazuh-manager:4.13.1
     container_name: ramv2-wazuh-manager
+    # Hostname referenced by wazuh.dashboard's WAZUH_API_URL below.
     hostname: wazuh.manager
     restart: always
     ulimits:
       memlock:
+        # Unlimited memlock for the manager's internal processes/analysisd.
         soft: -1
         hard: -1
       nofile:
+        # Very high open-file limit: the manager tracks per-agent queues
+        # and many log files, so it needs headroom well beyond the
+        # indexer's limit.
         soft: 655360
         hard: 655360
     ports:
+      # Agent registration/enrollment and event-forwarding port used by
+      # Wazuh agents connecting to this manager.
       - "1514:1514"
+      # Agent auto-enrollment (authd) port.
       - "1515:1515"
+      # Legacy syslog collector port (UDP) for devices forwarding syslog
+      # directly to the manager.
       - "514:514/udp"
+      # Wazuh RESTful API port, used by wazuh.dashboard (and any external
+      # tooling) to query/manage the manager.
       - "55000:55000"
     environment:
+      # URL of the Wazuh indexer (OpenSearch) the manager's Filebeat ships
+      # alerts to.
       - INDEXER_URL=https://wazuh.indexer:9200
+      # Indexer account the manager authenticates as when writing alerts.
       - INDEXER_USERNAME=admin
+      # Password for the indexer admin account, sourced from .env.
       - INDEXER_PASSWORD=${WAZUH_INDEXER_PASSWORD}
+      # Require full TLS certificate verification (hostname + chain) when
+      # Filebeat connects to the indexer, rather than a weaker mode.
       - FILEBEAT_SSL_VERIFICATION_MODE=full
+      # Path (inside the container) to the CA bundle Filebeat uses to trust
+      # the indexer's TLS certificate.
       - SSL_CERTIFICATE_AUTHORITIES=/etc/ssl/root-ca.pem
+      # Path to this manager's own TLS certificate, presented for
+      # mutual/Filebeat authentication.
       - SSL_CERTIFICATE=/etc/ssl/filebeat.pem
+      # Path to the private key paired with the certificate above.
       - SSL_KEY=/etc/ssl/filebeat.key
+      # Account used by wazuh.dashboard to call this manager's REST API.
       - API_USERNAME=wazuh-wui
+      # Password for the API account above, sourced from .env.
       - API_PASSWORD=${WAZUH_API_PASSWORD}
     volumes:
+      # Persist the manager's runtime API configuration.
       - wazuh_api_configuration:/var/ossec/api/configuration
+      # Persist Wazuh's /etc config directory (rules, decoders, ossec.conf
+      # overlays) across restarts.
       - wazuh_etc:/var/ossec/etc
+      # Persist Wazuh's own operational logs.
       - wazuh_logs:/var/ossec/logs
+      # Persist the internal message queue used between Wazuh daemons.
       - wazuh_queue:/var/ossec/queue
+      # Persist multi-group agent configuration assignments.
       - wazuh_var_multigroups:/var/ossec/var/multigroups
+      # Persist third-party integration scripts/binaries (includes the
+      # custom-ramv2 integration mounted below).
       - wazuh_integrations:/var/ossec/integrations
+      # Persist active-response scripts (automated remediation actions).
       - wazuh_active_response:/var/ossec/active-response/bin
+      # Persist agentless-monitoring configuration/state.
       - wazuh_agentless:/var/ossec/agentless
+      # Persist wodle (Wazuh module) state, e.g. for scheduled/periodic tasks.
       - wazuh_wodles:/var/ossec/wodles
+      # Persist Filebeat's own config directory.
       - filebeat_etc:/etc/filebeat
+      # Persist Filebeat's registry/state (tracks shipped-log offsets).
       - filebeat_var:/var/lib/filebeat
+      # CA cert (manager-side copy) used to validate the indexer's TLS cert
+      # when Filebeat ships alerts.
       - ./wazuh/config/wazuh_indexer_ssl_certs/root-ca-manager.pem:/etc/ssl/root-ca.pem
+      # This manager's TLS certificate for Filebeat's connection to the indexer.
       - ./wazuh/config/wazuh_indexer_ssl_certs/wazuh.manager.pem:/etc/ssl/filebeat.pem
+      # Private key paired with the manager certificate above.
       - ./wazuh/config/wazuh_indexer_ssl_certs/wazuh.manager-key.pem:/etc/ssl/filebeat.key
+      # Custom ossec.conf overlay defining this deployment's rules/inputs;
+      # mounted into the special wazuh-config-mount path so the manager's
+      # entrypoint merges it into the real config on startup.
       - ./wazuh/config/wazuh_cluster/wazuh_manager.conf:/wazuh-config-mount/etc/ossec.conf
+      # Custom RAM v2 integration directory: the hook Wazuh invokes on
+      # matching alerts to notify the agent-service for investigation.
       - ./wazuh/integrations/custom-ramv2:/var/ossec/integrations/custom-ramv2
+      # The custom integration's executable entry point script itself.
       - ./wazuh/integrations/custom-ramv2.py:/var/ossec/integrations/custom-ramv2.py
     networks:
       - ramnet
     depends_on:
+      # Wait for the indexer container to start (no service_healthy gate
+      # here) before starting the manager, since Filebeat needs it reachable.
       - wazuh.indexer
     deploy:
       resources:
         limits:
+          # Sized below the indexer's 2G since the manager's workload here
+          # (rule evaluation, log forwarding) is lighter than the index engine.
           memory: 1536M
 
   # ---------------- Wazuh dashboard (remapped 443 -> 8443) -----------------
+  # OpenSearch-Dashboards-based web UI for browsing Wazuh alerts/agents;
+  # used by analysts alongside TheHive and the analyst console.
   wazuh.dashboard:
+    # Official Wazuh dashboard image, version-matched to manager/indexer.
     image: wazuh/wazuh-dashboard:4.13.1
     container_name: ramv2-wazuh-dashboard
     hostname: wazuh.dashboard
     restart: always
     ports:
+      # Dashboard normally serves HTTPS on 5601; remapped to host port 8443
+      # to avoid clashing with other common local services on 443/5601.
       - "8443:5601"
     environment:
+      # Wazuh indexer account the dashboard uses for its own OpenSearch
+      # Dashboards internal queries.
       - INDEXER_USERNAME=admin
+      # Password for the account above, sourced from .env.
       - INDEXER_PASSWORD=${WAZUH_INDEXER_PASSWORD}
+      # URL of the Wazuh manager's REST API the dashboard calls to show
+      # agent/manager status and management screens.
       - WAZUH_API_URL=https://wazuh.manager
+      # Internal OpenSearch Dashboards service account (distinct from the
+      # human-facing wazuh-wui API account) used for dashboard-to-indexer auth.
       - DASHBOARD_USERNAME=kibanaserver
+      # Password for the kibanaserver account, sourced from .env.
       - DASHBOARD_PASSWORD=${WAZUH_DASHBOARD_PASSWORD}
+      # Account the dashboard uses to call the Wazuh manager API
+      # (WAZUH_API_URL above) — matches API_USERNAME on wazuh.manager.
       - API_USERNAME=wazuh-wui
+      # Password for the wazuh-wui API account, sourced from .env.
       - API_PASSWORD=${WAZUH_API_PASSWORD}
     volumes:
+      # This dashboard instance's TLS certificate, serving the HTTPS UI.
       - ./wazuh/config/wazuh_indexer_ssl_certs/wazuh.dashboard.pem:/usr/share/wazuh-dashboard/certs/wazuh-dashboard.pem
+      # Private key paired with the dashboard certificate above.
       - ./wazuh/config/wazuh_indexer_ssl_certs/wazuh.dashboard-key.pem:/usr/share/wazuh-dashboard/certs/wazuh-dashboard-key.pem
+      # CA cert used to trust the Wazuh indexer's TLS certificate when the
+      # dashboard queries it.
       - ./wazuh/config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-dashboard/certs/root-ca.pem
+      # Main OpenSearch Dashboards configuration file (server/security settings).
       - ./wazuh/config/wazuh_dashboard/opensearch_dashboards.yml:/usr/share/wazuh-dashboard/config/opensearch_dashboards.yml
+      # Wazuh-plugin-specific config (which manager API hosts it knows about, etc).
       - ./wazuh/config/wazuh_dashboard/wazuh.yml:/usr/share/wazuh-dashboard/data/wazuh/config/wazuh.yml
+      # Persist the Wazuh plugin's runtime config/state across restarts.
       - wazuh-dashboard-config:/usr/share/wazuh-dashboard/data/wazuh/config
+      # Persist custom branding/assets for the Wazuh plugin UI.
       - wazuh-dashboard-custom:/usr/share/wazuh-dashboard/plugins/wazuh/public/assets/custom
     networks:
       - ramnet
     depends_on:
+      # Needs both backends up: the indexer for data/search and the
+      # manager for the agent/API status screens (container-start order
+      # only — no health-gating here).
       - wazuh.indexer
       - wazuh.manager
     deploy:
       resources:
         limits:
+          # Lightest of the three Wazuh components since it's just a UI
+          # layer with no heavy indexing/rule-evaluation workload.
           memory: 768M
 
   # ---------------- Agent service (FastAPI) --------------------------------
+  # The custom AI investigation agent: receives triaged Wazuh alerts,
+  # investigates them (Gemini reasoning + VirusTotal/Wazuh Indexer tools),
+  # creates/updates TheHive cases, and serves the analyst console.
   agent-service:
+    # Build from the local Dockerfile/source in ./agent-service rather than
+    # pulling a pre-built image, since this is the project's own code.
     build: ./agent-service
+    # Tag applied to the built image, versioned for traceability.
     image: ramv2/agent-service:0.1.0
     container_name: ramv2-agent
+    # Hostname other services would use to reach this service (not
+    # currently depended on by others, but kept consistent with the rest
+    # of the stack).
     hostname: agent-service
     restart: unless-stopped
+    # Load all runtime configuration (API keys, DB creds, thresholds, etc.)
+    # from the top-level .env file — this is how every variable defined in
+    # .env.example reaches the Settings class in app/config.py.
     env_file: .env
     volumes:
       # Read-only Wazuh indexer CA so the agent can verify TLS to wazuh.indexer.
       - ./wazuh/config/wazuh_indexer_ssl_certs/root-ca.pem:/certs/root-ca.pem:ro
     ports:
+      # Expose the FastAPI app (agent API + analyst console) on the host,
+      # matching the Dockerfile's EXPOSE 8000 and uvicorn's bind port.
       - "8000:8000"
     networks:
       - ramnet
     depends_on:
+      # Needs TheHive reachable to create/update cases; container-start
+      # order only (no service_healthy gate), so the app must tolerate
+      # TheHive still warming up after this container starts.
       - thehive
     healthcheck:
+      # Use a stdlib-only Python one-liner (no extra HTTP client needed at
+      # healthcheck time) to hit the app's own /health endpoint and confirm
+      # it returns HTTP 200.
       test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)\""]
       interval: 15s
       timeout: 5s
@@ -264,25 +503,49 @@ services:
     deploy:
       resources:
         limits:
+          # Modest cap since this is a Python/FastAPI service without a
+          # heavy in-process datastore; most of its work is I/O to
+          # Gemini/VirusTotal/TheHive/Wazuh over the network.
           memory: 512M
 
+# Single flat network shared by every container in the stack so services
+# can address each other by hostname (e.g. agent-service -> thehive,
+# wazuh.manager -> wazuh.indexer) without publishing internal ports to the host.
 networks:
   ramnet:
+    # Fixed Docker network name (rather than compose's project-prefixed
+    # default) for predictable references from tooling/scripts.
     name: ramv2-net
 
+# Named volumes used to persist state across container recreation/restarts.
 volumes:
+  # Postgres data directory (pgvector semantic memory store).
   pgdata:
+  # Wazuh manager: runtime API configuration.
   wazuh_api_configuration:
+  # Wazuh manager: /etc config (rules, decoders, ossec.conf overlays).
   wazuh_etc:
+  # Wazuh manager: operational logs.
   wazuh_logs:
+  # Wazuh manager: internal daemon message queue.
   wazuh_queue:
+  # Wazuh manager: multi-group agent configuration assignments.
   wazuh_var_multigroups:
+  # Wazuh manager: third-party integrations (includes custom-ramv2).
   wazuh_integrations:
+  # Wazuh manager: active-response (automated remediation) scripts.
   wazuh_active_response:
+  # Wazuh manager: agentless-monitoring configuration/state.
   wazuh_agentless:
+  # Wazuh manager: wodle (module) state for scheduled/periodic tasks.
   wazuh_wodles:
+  # Filebeat (bundled with the manager): its own configuration.
   filebeat_etc:
+  # Filebeat: registry/state tracking shipped-log offsets.
   filebeat_var:
+  # Wazuh indexer: the actual indexed alert/log data.
   wazuh-indexer-data:
+  # Wazuh dashboard: the Wazuh plugin's runtime config/state.
   wazuh-dashboard-config:
+  # Wazuh dashboard: custom branding/assets for the Wazuh plugin UI.
   wazuh-dashboard-custom:

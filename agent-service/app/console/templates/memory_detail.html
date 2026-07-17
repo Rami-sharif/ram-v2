@@ -1,40 +1,61 @@
+<!-- Inherit the shared console shell (topbar, nav, dock) from base.html -->
 {% extends "base.html" %}
+<!-- Browser tab title, includes the memory row's id -->
 {% block title %}Memory #{{ m.id }} · RAM v2{% endblock %}
+<!-- Main page content -->
 {% block content %}
-<p><a href="/console/memory">← Memory store</a></p>
+<!-- Back-link to the memory list page -->
+<p><a href="/console/memory">← Agent knowledge</a></p>
+<!-- Page heading identifying which memory record this is -->
 <h1>Memory #{{ m.id }}</h1>
 
+<!-- Card showing the immutable identifying metadata for this memory row -->
 <section class="card">
+  <!-- Key/value grid of core alert identity fields -->
   <div class="kv">
+    <!-- Host that raised the alert, falling back to an em dash if unknown -->
     <span>Host</span><span>{{ m.agent_name or '—' }}</span>
+    <!-- Source IP associated with the alert, monospaced for readability -->
     <span>Source IP</span><span class="mono">{{ m.source_ip or '—' }}</span>
+    <!-- Detection rule id that fired, monospaced -->
     <span>Rule</span><span class="mono">{{ m.rule_id or '—' }}</span>
+    <!-- Event time: prefer the alert's own timestamp, fall back to when the record was created -->
     <span>Event time</span><span class="muted">{{ (m.alert_timestamp or m.created_at) }}</span>
   </div>
 </section>
 
-<h2>Analysis <span class="muted note">(editing this does NOT re-embed)</span></h2>
+<!-- Section heading for the editable analysis JSON; note clarifies edits don't trigger re-embedding -->
+<h2>Result <span class="muted note">(editing this does NOT change the search index)</span></h2>
 <section class="card">
+  <!-- Plain POST form (no htmx) that saves the edited analysis JSON back to the server -->
   <form method="post" action="/console/memory/{{ m.id }}/analysis">
+    <!-- Raw JSON editor textarea, pre-filled with the current analysis; spellcheck off since it's code -->
     <textarea name="analysis" rows="12" class="code" spellcheck="false">{{ analysis_json }}</textarea>
-    <div><button type="submit">Save analysis (no re-embed)</button></div>
+    <div><button type="submit">Save result</button></div>
   </form>
 </section>
 
-<h2>Identity / alert_text <span class="muted note">(editing this RE-EMBEDS via the locked pipeline)</span></h2>
+<!-- Section heading warning that editing this field re-triggers the embedding pipeline -->
+<h2>Alert text <span class="muted note">(editing this UPDATES THE SEARCH INDEX)</span></h2>
 <section class="card">
+  <!-- Form posts the new identity text; onsubmit confirms since re-embedding is a costly/locked action -->
   <form method="post" action="/console/memory/{{ m.id }}/identity"
-        onsubmit="return confirm('Changing the identity text re-embeds this memory. Continue?')">
+        onsubmit="return confirm('Changing the alert text updates the search index for this memory. Continue?')">
+    <!-- Editable alert_text (the text that gets embedded for semantic search), falls back to empty -->
     <textarea name="alert_text" rows="4" class="code" spellcheck="false">{{ m.alert_text or '' }}</textarea>
-    <div><button type="submit">Save identity &amp; re-embed</button></div>
+    <div><button type="submit">Save &amp; update search index</button></div>
   </form>
 </section>
 
+<!-- Section heading for the destructive delete action -->
 <h2>Delete</h2>
 <section class="card">
+  <!-- Delete form; onsubmit confirms since this permanently removes the memory row (audited action) -->
   <form method="post" action="/console/memory/{{ m.id }}/delete"
-        onsubmit="return confirm('Permanently delete memory #{{ m.id }}? This is audited.')">
+        onsubmit="return confirm('Permanently delete memory #{{ m.id }}? This is logged.')">
+    <!-- Danger-styled submit button for the delete action -->
     <button type="submit" class="danger">Delete this memory</button>
   </form>
 </section>
+<!-- Close the content block -->
 {% endblock %}

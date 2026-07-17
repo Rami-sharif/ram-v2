@@ -1,11 +1,42 @@
+# Web framework powering the agent-service API: defines the HTTP endpoints
+# in app/main.py, app/memory_api.py, app/ops_api.py, and app/console/*
+# (routers, request/response handling, dependency injection via Depends).
 fastapi>=0.115,<1.0
+# ASGI server that actually runs the FastAPI app; "[standard]" pulls in
+# extras like uvloop/httptools for performance. Invoked directly in the
+# Dockerfile's CMD to serve app.main:app.
 uvicorn[standard]>=0.32,<1.0
+# Data validation/serialization library FastAPI is built on; used for
+# request/response schemas in app/schemas.py (BaseModel, Field, ConfigDict).
 pydantic>=2.9,<3.0
+# Extension of Pydantic for loading typed settings from environment
+# variables; backs the Settings class in app/config.py that reads every
+# variable defined in .env.example.
 pydantic-settings>=2.6,<3.0
+# Official Google Gen AI SDK, used to call the Gemini model for the agent's
+# reasoning/tool-use loop (app/agent.py) and to generate embeddings for
+# semantic memory (app/memory.py).
 google-genai>=1.0.0,<2.0
+# Async-capable HTTP client used to talk to external services over REST:
+# TheHive's API (app/thehive.py), VirusTotal (app/tools/virustotal.py), and
+# the Wazuh Indexer/OpenSearch API (app/tools/wazuh_indexer.py).
 httpx>=0.27,<1.0
+# PostgreSQL driver (with binary wheels and a connection-pool extra), used
+# to talk to the pgvector-backed Postgres instance for semantic memory and
+# the analyst console's persisted data (app/db.py, app/memory.py,
+# app/console/store.py, app/triage.py).
 psycopg[binary,pool]>=3.2,<4.0
+# Templating engine used to render the analyst console's HTML pages via
+# FastAPI's Jinja2Templates integration (app/console/templating.py).
 jinja2>=3.1,<4.0
+# Required by FastAPI/Starlette to parse multipart/form-encoded request
+# bodies, needed for the console's login/HTML Form(...) fields
+# (app/console/auth.py, app/console/router.py).
 python-multipart>=0.0.9,<1.0
+# Password hashing library (Argon2) used to hash/verify analyst console
+# login credentials (app/console/auth.py: PasswordHasher, VerifyMismatchError).
 argon2-cffi>=23.1,<26.0
+# Cryptographic signing library that Starlette's SessionMiddleware depends
+# on to sign session cookies, underpinning the analyst console's session
+# auth (SESSION_SECRET_KEY, used in app/main.py).
 itsdangerous>=2.1,<3.0

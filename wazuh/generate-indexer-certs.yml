@@ -1,8 +1,22 @@
 # Wazuh App Copyright (C) 2017, Wazuh Inc. (License GPLv2)
+# Standalone Docker Compose file used to run the certificate generator as a
+# one-off job (e.g. `docker compose -f generate-indexer-certs.yml run
+# generator`) to (re)create the indexer/manager/dashboard TLS certificates
+# before starting the main stack.
 services:
+  # The single service defined in this compose file: a short-lived
+  # container that generates all certs and then exits.
   generator:
+    # Official Wazuh certs-generator image; pinned to a specific version so
+    # cert generation behavior doesn't shift unexpectedly on rebuilds.
     image: wazuh/wazuh-certs-generator:0.0.2
+    # Container hostname, mostly cosmetic here since the container isn't
+    # meant to stay running or be addressed by name from other services.
     hostname: wazuh-certs-generator
     volumes:
+      # Output directory: generated certs/keys are written here on the
+      # host so the manager/indexer/dashboard containers can mount them.
       - ./config/wazuh_indexer_ssl_certs/:/certificates/
+      # Input config: mounts config/certs.yml (the node list/topology) into
+      # the path the generator image expects to read it from.
       - ./config/certs.yml:/config/certs.yml

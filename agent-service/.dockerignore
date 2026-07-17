@@ -1,6 +1,19 @@
+# Compiled Python bytecode caches: machine/host-specific, regenerated at
+# runtime inside the container, and would only bloat the build context.
 __pycache__/
+# Individual compiled bytecode files (same rationale as __pycache__/ above,
+# in case any stray .pyc files exist outside a __pycache__ directory).
 *.pyc
+# Local Python virtual environment: host-specific interpreter/paths that
+# must never be copied into the image; the image installs its own deps
+# via requirements.txt instead.
 .venv/
+# Pytest's cache directory: local test-run metadata with no purpose inside
+# the built container image.
 .pytest_cache/
+# Test suite source: not needed to run the service in production, so
+# excluding it keeps the image smaller and avoids shipping test fixtures.
 tests/
+# Markdown documentation files: irrelevant to running the service, so kept
+# out of the build context/image.
 *.md

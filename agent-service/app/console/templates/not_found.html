@@ -1,6 +1,12 @@
+<!-- Inherit the shared shell (topbar, nav, assistant dock, flash messages) from base.html -->
 {% extends "base.html" %}
+<!-- Fill the <title> block defined in base.html with this page's title -->
 {% block title %}Not found · RAM v2{% endblock %}
+<!-- Begin the main page content that base.html renders inside <main class="content"> -->
 {% block content %}
+<!-- Heading showing which investigation id could not be located, interpolated from the view context -->
 <h1>Investigation #{{ inv_id }} not found</h1>
-<p class="muted">No such investigation record. <a href="/console/queue">Back to the queue</a>.</p>
+<!-- Muted helper text plus a link back to the triage queue so the analyst isn't stuck on a dead end -->
+<p class="muted">There's no investigation with that number. <a href="/console/queue">Back to the queue</a>.</p>
+<!-- Close the content block -->
 {% endblock %}

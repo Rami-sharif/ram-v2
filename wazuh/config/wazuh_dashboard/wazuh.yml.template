@@ -1,7 +1,21 @@
+# Top-level list of Wazuh manager API connections the Wazuh dashboard app
+# can query; usually one entry per manager/cluster the dashboard manages.
 hosts:
+  # Single manager entry, keyed by an arbitrary numeric ID used internally
+  # by the Wazuh dashboard app to identify this connection.
   - 1513629884013:
+      # Base URL of the Wazuh manager's RESTful API, addressed by its
+      # Docker Compose service name over HTTPS.
       url: "https://wazuh.manager"
+      # Port the Wazuh manager API (wazuh-apid) listens on.
       port: 55000
+      # Username the dashboard uses to authenticate against the manager
+      # API; "wazuh-wui" is the built-in account intended for this purpose.
       username: wazuh-wui
+      # Password for the above API user. This is a template placeholder
+      # (###WAZUH_API_PASSWORD###) substituted at deploy/startup time with
+      # the real secret, so it isn't committed in plaintext.
       password: "###WAZUH_API_PASSWORD###"
+      # Do not run API requests as a different Linux user ("run_as");
+      # authenticate and act strictly as the configured username above.
       run_as: false

@@ -1,0 +1,21 @@
+{
+  "timestamp": "2026-07-14T09:15:00.000+0000",
+  "id": "1752480900.300002",
+  "location": "syscheck",
+  "rule": {
+    "level": 13,
+    "description": "Web shell written to web-accessible directory.",
+    "id": "100502",
+    "groups": ["syscheck", "web", "webshell"],
+    "mitre": { "id": ["T1505.003"], "tactic": ["Persistence"], "technique": ["Web Shell"] }
+  },
+  "agent": { "id": "001", "name": "web-server-01", "ip": "10.0.0.5" },
+  "data": {
+    "srcip": "45.155.205.233",
+    "file": "/var/www/html/uploads/shell.php",
+    "md5": "9c1c9e0dd3a0e04b1e2b4b6a1d5a4e77",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "full_log": "File '/var/www/html/uploads/shell.php' added. Contents match PHP webshell signature (eval($_POST[...]))",
+  "decoder": { "name": "syscheck_new_entry" }
+}

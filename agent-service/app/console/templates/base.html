@@ -1,38 +1,63 @@
+<!-- HTML5 doctype -->
 <!doctype html>
+<!-- Root element, English language for accessibility/SEO -->
 <html lang="en">
 <head>
+  <!-- UTF-8 character encoding -->
   <meta charset="utf-8">
+  <!-- Responsive viewport so the console scales correctly on mobile/narrow screens -->
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- Page title; child templates override this via the "title" block -->
   <title>{% block title %}RAM v2 Console{% endblock %}</title>
+  <!-- Main stylesheet; asset_version query param busts the cache on deploys -->
   <link rel="stylesheet" href="/console/static/style.css?v={{ asset_version }}">
+  <!-- htmx library, loaded deferred so it doesn't block initial page render -->
   <script src="/console/static/htmx.min.js" defer></script>
+  <!-- App-specific JS (dock toggle, bulk-delete, copy-to-clipboard, etc.), also cache-busted -->
   <script src="/console/static/console.js?v={{ asset_version }}" defer></script>
 </head>
 <body>
+  <!-- Only render the authenticated chrome (topbar/nav) when an analyst session is present;
+       the login page has no `analyst` so this whole header is skipped -->
   {% if analyst %}
   <header class="topbar">
+    <!-- Product/brand label in the top bar -->
     <span class="brand">RAM v2 <span class="slash">/</span> Analyst Console</span>
     <nav>
+      <!-- Overview nav link; "active" class applied when the current page's nav flag matches -->
       <a href="/console/"{% if nav == 'overview' %} class="active"{% endif %}>Overview</a>
+      <!-- Queue nav link; highlighted active when viewing the triage queue -->
       <a href="/console/queue"{% if nav == 'queue' %} class="active"{% endif %}>Queue</a>
+      <!-- Agent (assistant full page) nav link; highlighted when on that page -->
       <a href="/console/agent"{% if nav == 'agent' %} class="active"{% endif %}>Agent</a>
+      <!-- Memory browser nav link; highlighted when on that page -->
       <a href="/console/memory"{% if nav == 'memory' %} class="active"{% endif %}>Memory</a>
     </nav>
     <span class="who">
+      <!-- Only show the floating-assistant toggle button unless this page explicitly hides the dock -->
       {% if not hide_dock %}
+      <!-- Button that opens/closes the assistant dock; console.js toggles aria-expanded and
+           dispatches the "dockopen" event the dock's hx-trigger listens for -->
       <button type="button" class="assistant-toggle" id="assistant-toggle"
               aria-controls="assistant-dock" aria-expanded="false">Assistant</button>
       {% endif %}
+      <!-- Small "active" status indicator dot/label -->
       <span class="status-led">active</span>{{ analyst.display_name }} ({{ analyst.role }})
+      <!-- Logout link -->
       · <a href="/console/logout">logout</a></span>
   </header>
   {% endif %}
   <main class="content">
+    <!-- Success flash message (e.g. "saved", "deleted") passed via query string/session -->
     {% if msg %}<div class="flash ok">{{ msg.replace('+', ' ') }}</div>{% endif %}
+    <!-- Error flash message, rendered in a distinct "bad" style -->
     {% if err %}<div class="flash bad">{{ err.replace('+', ' ') }}</div>{% endif %}
+    <!-- Placeholder that every page template fills with its own markup -->
     {% block content %}{% endblock %}
   </main>
+  <!-- Include the floating assistant dock only for authenticated pages that don't hide it -->
   {% if analyst and not hide_dock %}{% include "_assistant_dock.html" %}{% endif %}
+  <!-- Container JS uses to append transient toast notifications; aria-live announces them -->
   <div id="toast-container" aria-live="polite"></div>
 </body>
 </html>

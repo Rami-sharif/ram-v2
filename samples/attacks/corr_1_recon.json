@@ -1,0 +1,20 @@
+{
+  "timestamp": "2026-07-15T08:00:00.000+0000",
+  "id": "1752566400.400010",
+  "location": "/var/log/auth.log",
+  "rule": {
+    "level": 10,
+    "description": "sshd: Multiple authentication failures from a single source.",
+    "id": "5712",
+    "groups": ["syslog", "sshd", "authentication_failures"],
+    "mitre": { "id": ["T1110"], "tactic": ["Credential Access"], "technique": ["Brute Force"] }
+  },
+  "agent": { "id": "013", "name": "db-server-05", "ip": "10.0.0.55" },
+  "data": {
+    "srcip": "193.42.33.77",
+    "srcport": "44122",
+    "dstuser": "postgres"
+  },
+  "full_log": "Jul 15 08:00:00 db-server-05 sshd[30211]: Failed password for postgres from 193.42.33.77 port 44122 ssh2",
+  "decoder": { "name": "sshd" }
+}

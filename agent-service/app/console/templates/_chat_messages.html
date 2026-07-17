@@ -1,26 +1,43 @@
+<!-- Loop over every message in the active conversation, oldest first -->
 {% for m in messages %}
+<!-- One message bubble; chat-{{ m.role }} (e.g. chat-analyst / chat-assistant) drives the
+     left/right + color styling per role -->
 <div class="chat-msg chat-{{ m.role }}">
+  <!-- Header row: who sent it, plus the raw actor identifier -->
   <div class="chat-meta">
+    <!-- Human-friendly label: "You" for the analyst role, "Assistant" for anything else -->
     <strong>{{ 'You' if m.role == 'analyst' else 'Assistant' }}</strong>
+    <!-- Muted actor identifier (username or agent identity) backing the label above -->
     <span class="muted">{{ m.actor }}</span>
   </div>
+  <!-- The actual message text/body content -->
   <div class="chat-body">{{ m.message }}</div>
+  <!-- Only show the "cases referenced" block if this message links to one or more investigations -->
   {% if m.referenced_case_ids %}
   <div class="chat-refs">
+    <!-- Label preceding the list of referenced case links -->
     <span class="muted">cases referenced:</span>
+    <!-- Render a link per referenced case id, pointing at that investigation's detail page -->
     {% for cid in m.referenced_case_ids %}<a href="/console/investigations/{{ cid }}">#{{ cid }}</a>{% endfor %}
   </div>
   {% endif %}
+  <!-- Only render the tool-call trace if the assistant invoked any tools for this message -->
   {% if m.tool_calls %}
   <ul class="chat-tools">
+    <!-- One list item per tool call made while producing this message -->
     {% for t in m.tool_calls %}
+    <!-- Class flags whether the call errored ("bad") or succeeded ("ok"), for styling -->
     <li class="{{ 'bad' if t.error else 'ok' }}">
+      <!-- Name of the tool that was invoked -->
       <code>{{ t.tool }}</code>
+      <!-- Show the call arguments as JSON only when arguments were actually passed -->
       {% if t.args %}<span class="muted mono">{{ t.args | tojson }}</span>{% endif %}
+      <!-- Show the error message if the call failed, otherwise a plain "ok" marker -->
       {% if t.error %}— <span class="err">{{ t.error }}</span>{% else %}— ok{% endif %}
     </li>
     {% endfor %}
   </ul>
   {% endif %}
 </div>
+<!-- End of the per-message loop -->
 {% endfor %}

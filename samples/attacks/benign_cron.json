@@ -1,0 +1,17 @@
+{
+  "timestamp": "2026-07-15T02:15:00.000+0000",
+  "id": "1752545700.400001",
+  "location": "/var/log/syslog",
+  "rule": {
+    "level": 2,
+    "description": "Scheduled cron job executed successfully.",
+    "id": "2501",
+    "groups": ["syslog", "cron"]
+  },
+  "agent": { "id": "011", "name": "backup-node-07", "ip": "10.0.0.71" },
+  "data": {
+    "srcuser": "backup"
+  },
+  "full_log": "Jul 15 02:15:00 backup-node-07 CRON[8891]: (backup) CMD (/usr/local/bin/nightly-backup.sh)",
+  "decoder": { "name": "cron" }
+}

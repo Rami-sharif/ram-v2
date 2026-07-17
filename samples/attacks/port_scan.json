@@ -1,0 +1,20 @@
+{
+  "timestamp": "2026-07-14T09:25:00.000+0000",
+  "id": "1752481500.300004",
+  "location": "/var/log/firewall.log",
+  "rule": {
+    "level": 6,
+    "description": "Multiple connection attempts to closed ports (port scan).",
+    "id": "40101",
+    "groups": ["firewall", "recon", "scan"],
+    "mitre": { "id": ["T1046"], "tactic": ["Discovery"], "technique": ["Network Service Discovery"] }
+  },
+  "agent": { "id": "002", "name": "fw-edge-01", "ip": "10.0.0.2" },
+  "data": {
+    "srcip": "91.202.10.20",
+    "dstip": "10.0.0.5",
+    "dstport": "22,23,80,443,3306,3389,8080"
+  },
+  "full_log": "Jul 14 09:25:00 fw-edge-01 kernel: DROP IN=eth0 SRC=91.202.10.20 DST=10.0.0.5 PROTO=TCP DPT=3306 (7 ports in 4s)",
+  "decoder": { "name": "iptables" }
+}

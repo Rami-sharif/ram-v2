@@ -1,35 +1,55 @@
+<!-- Inherit the shared console shell from base.html -->
 {% extends "base.html" %}
+<!-- Browser tab title for the full-page agent workspace -->
 {% block title %}Agent · RAM v2{% endblock %}
+<!-- Main page content -->
 {% block content %}
 <div class="page-head">
+  <!-- Small status readout row summarizing the current session -->
   <div class="readout">
+    <!-- Static label indicating the assistant runs in interactive (chat) mode here -->
     <span>mode <b>interactive</b></span>
+    <!-- Currently signed-in analyst's username -->
     <span>identity <b>{{ analyst.username }}</b></span>
+    <!-- Count of this analyst's conversations -->
     <span>chats <b>{{ conversations | length }}</b></span>
   </div>
+  <!-- Page heading -->
   <h1>Agent</h1>
-  <p class="muted">Full-screen workspace for the investigation assistant. Each chat keeps its own
-    history; the shared alert memory is available to all of them. Ask about any case by number,
-    compare cases, pivot on an indicator, query the Wazuh logs, or request an audited action.</p>
+  <!-- Explanatory copy describing what this full-screen assistant workspace does -->
+  <p class="muted">Full-screen space for the assistant. Each chat keeps its own history, and all of
+    them can use the shared alert memory. Ask about any case by number, compare cases, look up an IP
+    or hash, search the Wazuh logs, or ask it to do a logged action.</p>
 </div>
 
+<!-- Two-column layout: conversation sidebar + active chat panel -->
 <div class="agent-layout">
   <aside class="convo-sidebar">
+    <!-- Plain POST form to create a brand-new conversation (full page reload/redirect, unlike
+         the htmx version used in the dock) -->
     <form method="post" action="/console/conversations" class="convo-new">
       <button type="submit">+ New chat</button>
     </form>
+    <!-- List of the analyst's existing conversations -->
     <ul class="convo-list">
+      <!-- Iterate every conversation; the for-loop's else branch fires only when the list is empty -->
       {% for c in conversations %}
+      <!-- Highlight the currently open conversation with the "active" class -->
       <li class="convo-item{% if c.id == active.id %} active{% endif %}">
+        <!-- Link that switches the active conversation via the ?c= query param -->
         <a class="convo-open" href="/console/agent?c={{ c.id }}">
+          <!-- Conversation title -->
           <span class="convo-title">{{ c.title }}</span>
+          <!-- Message count and last-updated timestamp, formatted for compact display -->
           <span class="convo-meta muted">{{ c.message_count }} msg · {{ c.updated_at.strftime('%m-%d %H:%M') }}</span>
         </a>
+        <!-- Delete-this-conversation form; confirm() guards against accidental data loss -->
         <form method="post" action="/console/conversations/{{ c.id }}/delete" class="convo-del"
               onsubmit="return confirm('Delete this chat and its history?')">
           <button type="submit" class="icon-btn" title="Delete chat" aria-label="Delete chat">✕</button>
         </form>
       </li>
+      <!-- Fallback row rendered only when there are no conversations at all -->
       {% else %}
       <li class="muted">No chats yet.</li>
       {% endfor %}
@@ -38,33 +58,45 @@
 
   <section class="card agent-page">
     <div class="agent-active-head">
+      <!-- Rename form for the active conversation's title -->
       <form method="post" action="/console/conversations/{{ active.id }}/rename" class="rename-form">
+        <!-- Editable title input, pre-filled with the current title -->
         <input type="text" name="title" value="{{ active.title }}" aria-label="Chat title" maxlength="120">
         <button type="submit" class="secondary">rename</button>
       </form>
     </div>
 
+    <!-- Reuse the shared chat-log partial for the active conversation; the with-block aliases the
+         active conversation's messages/id to the variable names _chat_log.html expects -->
     {% with messages = chat, conversation = active %}{% include "_chat_log.html" %}{% endwith %}
 
+    <!-- Quick-fill suggestion chips for this full-page view (handled by console.js) -->
     <div class="chat-prompts">
       <button type="button" class="secondary chip" data-fill-prompt="Summarize the latest high-severity alerts and note any overlaps.">brief overview</button>
       <button type="button" class="secondary chip" data-fill-prompt="Compare the source IPs and case numbers for the latest flagged alerts.">compare cases</button>
-      <button type="button" class="secondary chip" data-fill-prompt="Find the most recent case linked to the same host and summarize it.">host pivot</button>
+      <button type="button" class="secondary chip" data-fill-prompt="Find the most recent case linked to the same host and summarize it.">same host</button>
       <button type="button" class="secondary chip" data-fill-prompt="Using the Wazuh logs, count alerts grouped by rule id over the last 7 days.">log counts</button>
     </div>
 
+    <!-- Message-send form, identical wiring to the dock's chat form -->
     <form class="chat-form"
           hx-post="/console/chat"
           hx-target="#chat-log" hx-swap="beforeend"
           hx-vals='js:{conversation_id: document.getElementById("chat-log")?.dataset.conversationId || ""}'
           hx-on::after-request="if(event.detail.successful){this.reset();var e=document.getElementById('chat-empty');if(e)e.remove();}">
+      <!-- htmx-post sends the message; target/swap append the reply to the log; hx-vals reads
+           the active conversation id; after-request clears the textarea and empty-state hint -->
+      <!-- Message input textarea -->
       <textarea name="message" rows="3" required
         placeholder="Ask the assistant… (Enter to send, Shift+Enter for a newline)"></textarea>
+      <!-- Send button -->
       <button type="submit">Send</button>
     </form>
-    <p class="muted note">The assistant may take audited actions (verdict, triage feedback, case
-      close / severity / comment) on a case you name; each is attributed to
-      {{ analyst.username }} and written to the audit log.</p>
+    <!-- Audit disclosure note, same as in the dock -->
+    <p class="muted note">The assistant can do logged actions (decision, sorting feedback, close a case /
+      set severity / add a comment) on a case you name. Each is saved under
+      {{ analyst.username }} and written to the activity log.</p>
   </section>
 </div>
+<!-- Close the content block -->
 {% endblock %}

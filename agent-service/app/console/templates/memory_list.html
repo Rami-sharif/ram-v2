@@ -1,24 +1,38 @@
+<!-- Inherit the shared console shell from base.html -->
 {% extends "base.html" %}
+<!-- Browser tab title for the memory browser page -->
 {% block title %}Memory · RAM v2{% endblock %}
+<!-- Main page content -->
 {% block content %}
 <div class="page-head">
+  <!-- Page heading -->
   <h1>Agent knowledge</h1>
+  <!-- Explanatory copy: what this page shows and what the "learned" tag means -->
   <p class="muted">What the agent has learned from past alerts. Rows marked
-    <span class="tag review-corrected">✎ learned</span> carry your reviewed ground truth and
-    steer future investigations of similar alerts.</p>
+    <span class="tag review-corrected">✎ learned</span> hold your corrections and
+    guide how it checks similar alerts later.</p>
 </div>
 
 <div class="filters-bar">
+  <!-- GET search/filter form; query params round-trip through the URL so filters are shareable/bookmarkable -->
   <form class="filters" method="get" action="/console/memory">
-    <input type="text" name="q" value="{{ q }}" placeholder="Semantic search (embeds query)">
+    <!-- Free-text query; server embeds it and does a semantic/nearest-neighbor search -->
+    <input type="text" name="q" value="{{ q }}" placeholder="Smart search (by meaning)">
+    <!-- Filter by host/agent name -->
     <input type="text" name="agent_name" value="{{ agent_name }}" placeholder="host">
+    <!-- Filter by source IP -->
     <input type="text" name="source_ip" value="{{ source_ip }}" placeholder="source ip">
+    <!-- Filter by detection rule id -->
     <input type="text" name="rule_id" value="{{ rule_id }}" placeholder="rule id">
+    <!-- Preserve the "reviewed only" filter across form submissions as a hidden field -->
     {% if reviewed %}<input type="hidden" name="reviewed" value="1">{% endif %}
     <button type="submit">Search</button>
+    <!-- Clear all filters by linking back to the bare memory page -->
     <a class="muted" href="/console/memory">reset</a>
   </form>
   <div class="quick-filters">
+    <!-- Toggle chip for "analyst-reviewed only"; shows the "on" state and a link that removes
+         the reviewed param when already active, otherwise a link that adds it -->
     {% if reviewed %}
       <a class="chip chip-on" href="/console/memory?{{ {'q': q, 'agent_name': agent_name, 'source_ip': source_ip, 'rule_id': rule_id} | urlencode }}">✎ analyst-reviewed only</a>
     {% else %}
@@ -26,69 +40,103 @@
     {% endif %}
   </div>
 </div>
-{% if q %}<p class="muted">Semantic search results (nearest first).</p>{% endif %}
+<!-- Hint clarifying that results are ranked by similarity when a semantic query is active -->
+{% if q %}<p class="muted">Smart search results (closest match first).</p>{% endif %}
 
+<!-- Bulk-delete form; lives separately from the table so row checkboxes can join it via
+     form="bulk-delete" (see below) without nesting a <form> inside <table> rows -->
 <form method="post" action="/console/memory/bulk-delete" id="bulk-delete"
       class="bulk-bar" data-bulk-bar hidden>
+  <!-- Preserve current query string so the redirect after delete returns to the same filtered view -->
   <input type="hidden" name="back" value="{{ request.url.query }}">
+  <!-- Live count of selected rows, updated by console.js -->
   <span class="bulk-count"><b data-bulk-count>0</b> selected</span>
+  <!-- Clears the current selection (JS-driven, data-bulk-clear hook) -->
   <button type="button" class="btn-cancel-delete" data-bulk-clear>clear</button>
   <span class="bulk-spacer"></span>
+  <!-- Arms the confirmation step before allowing the actual delete submit -->
   <button type="button" class="danger" data-bulk-arm>Delete selected</button>
+  <!-- Confirmation sub-panel, hidden until "Delete selected" is clicked -->
   <span class="bulk-confirm" hidden>
-    <span class="bulk-warn">The agent forgets these alerts, including any ground truth you taught it. Cannot be undone.</span>
+    <!-- Strong warning: deleting memory also destroys any human-taught ground truth -->
+    <span class="bulk-warn">The agent forgets these alerts, including any corrections you taught it. Cannot be undone.</span>
+    <!-- Final submit button that actually performs the bulk delete -->
     <button type="submit" class="btn-confirm-delete" data-bulk-submit>Delete <b data-bulk-count>0</b></button>
+    <!-- Cancels the armed confirmation, reverting to the initial state -->
     <button type="button" class="btn-cancel-delete" data-bulk-disarm>keep</button>
   </span>
 </form>
 
+<!-- Main results table; "responsive" class enables the data-label-based mobile layout -->
 <table class="responsive">
   <thead>
     <tr><th class="col-select">
+        <!-- Select-all checkbox for bulk actions (wired up in console.js via data-select-all) -->
         <input type="checkbox" data-select-all aria-label="Select every memory on this page">
       </th>
+      <!-- Static column headers -->
       <th>id</th><th>Time</th><th>Host</th><th>Source IP</th><th>Rule</th>
-      <th>Severity</th>{% if q %}<th>Sim</th>{% endif %}<th>Identity (alert_text)</th><th></th></tr>
+      <!-- Similarity column only makes sense when a semantic query is active -->
+      <th>Severity</th>{% if q %}<th>Match</th>{% endif %}<th>Alert text</th><th></th></tr>
   </thead>
   <tbody>
+    <!-- Iterate every memory row for this page/filter; the for-loop's else branch covers the empty case -->
     {% for m in rows %}
     <tr class="row">
+      <!-- Per-row selection checkbox; form="bulk-delete" attaches it to the external bulk form -->
       <td data-label="Select" class="col-select">
         <input type="checkbox" form="bulk-delete" name="ids" value="{{ m.id }}"
                data-row-select aria-label="Select memory {{ m.id }}">
       </td>
+      <!-- Memory row id -->
       <td data-label="id">{{ m.id }}</td>
+      <!-- Timestamp: alert time if known, else record creation time -->
       <td data-label="Time" class="nowrap muted">{{ (m.alert_timestamp or m.created_at).strftime('%Y-%m-%d %H:%M') }}</td>
+      <!-- Host/agent name, dash if missing -->
       <td data-label="Host">{{ m.agent_name or '—' }}</td>
+      <!-- Source IP; wrapped in a copyable span with click-to-copy affordance when present -->
       <td data-label="Source IP" class="mono">{% if m.source_ip %}<span class="copyable" data-copy="{{ m.source_ip }}" title="click to copy">{{ m.source_ip }}</span>{% else %}—{% endif %}</td>
+      <!-- Detection rule id -->
       <td data-label="Rule" class="mono">{{ m.rule_id or '—' }}</td>
+      <!-- Severity tag/score if analysis exists, plus a learned/confirmed badge when reviewed -->
       <td data-label="Severity">{% if m.analysis %}<span class="sev sev-{{ m.analysis.severity_label }}">{{ m.analysis.severity_label }}</span>{% if m.analysis.severity_score is not none %} <span class="muted">{{ m.analysis.severity_score }}</span>{% endif %}{% else %}—{% endif %}
         {% if m.analysis and m.analysis.human_reviewed %}<span class="tag {% if m.analysis.human_action == 'override' %}review-corrected">✎ learned{% else %}review-confirmed">✓ confirmed{% endif %}</span>{% endif %}</td>
+      <!-- Similarity score column, only rendered when a semantic search query is active -->
       {% if q %}<td data-label="Sim" class="muted">{{ '%.3f'|format(m.similarity) if m.similarity is not none else '—' }}</td>{% endif %}
+      <!-- Truncated preview of the alert_text/identity field, with ellipsis if it was cut off -->
       <td data-label="Identity" class="mono snippet">{{ (m.alert_text or '')[:90] }}{% if (m.alert_text or '')|length > 90 %}…{% endif %}</td>
+      <!-- Row actions: link to the full memory detail page -->
       <td data-label="" class="row-actions">
         <div class="row-actions-inner">
           <a class="btn-open" href="/console/memory/{{ m.id }}">open<span class="caret" aria-hidden="true">›</span></a>
         </div>
       </td>
     </tr>
+    <!-- Empty-state row shown when no memory rows match the current filters -->
     {% else %}
     <tr><td colspan="{{ 10 if q else 9 }}">
       <div class="empty-state">
         <p class="empty-title">No memory rows</p>
-        <p class="muted">The agent writes a memory for every alert it investigates. {% if q or agent_name or source_ip or rule_id %}Nothing matches these filters — <a href="/console/memory">clear them</a>.{% endif %}</p>
+        <!-- Explain why: either no data yet, or filters excluded everything (with a clear link) -->
+        <p class="muted">The agent saves a memory for every alert it checks. {% if q or agent_name or source_ip or rule_id %}Nothing matches these filters — <a href="/console/memory">clear them</a>.{% endif %}</p>
       </div>
     </td></tr>
     {% endfor %}
   </tbody>
 </table>
 
+<!-- Pagination controls; hidden during semantic search (which returns a ranked, unpaged set) -->
 {% if not q and total_pages > 1 %}
 <nav class="pager">
+  <!-- Build the shared query string (filters only, no page) reused by both prev/next links -->
   {% set qs = {'agent_name': agent_name, 'source_ip': source_ip, 'rule_id': rule_id} | urlencode %}
+  <!-- Previous-page link, disabled (plain text) on the first page -->
   {% if page > 1 %}<a href="/console/memory?{{ qs }}&page={{ page - 1 }}">← prev</a>{% else %}<span class="muted">← prev</span>{% endif %}
+  <!-- Current page indicator -->
   <span class="muted">page {{ page }}</span>
+  <!-- Next-page link, disabled on the last page -->
   {% if page < total_pages %}<a href="/console/memory?{{ qs }}&page={{ page + 1 }}">next →</a>{% else %}<span class="muted">next →</span>{% endif %}
 </nav>
 {% endif %}
+<!-- Close the content block -->
 {% endblock %}

@@ -2,55 +2,105 @@
 # This is the internal user database
 # The hash value is a bcrypt hash and can be generated with plugin/tools/hash.sh
 
+# Metadata block required by the OpenSearch Security plugin to recognize and
+# version this configuration file's schema.
 _meta:
+  # Declares this file as the "internalusers" config type (as opposed to
+  # roles, roles_mapping, etc.).
   type: "internalusers"
+  # Schema/config format version expected by the security plugin.
   config_version: 2
 
 # Define your internal users here
 
 ## Demo users
 
+# Primary administrative account for the whole stack (indexer, dashboard,
+# and API access via the admin backend role).
 admin:
+  # bcrypt hash of the admin password; the plaintext is never stored here.
   hash: "$2y$12$272OQuePfMFhQR9Pbf05Ve99TGQm0exxRgCtxNyJl3fUWl.1ichFW"
+  # Reserved users cannot be deleted/modified via the security API/UI,
+  # protecting this critical account from accidental changes.
   reserved: true
+  # Backend roles drive role-mapping; "admin" maps to full cluster/index
+  # privileges.
   backend_roles:
   - "admin"
+  # Human-readable note identifying this as the RAM v2 admin account.
   description: "RAM v2 admin user"
 
+# Service account used internally by the Wazuh dashboard to talk to the
+# indexer's security plugin (not meant for interactive human login).
 kibanaserver:
+  # bcrypt hash of the kibanaserver service account password.
   hash: "$2y$12$OJVnomYujNpkiDJwPzlq5OOLzR4eBz7FMn5lsU2ZCw9RjGFUAjWje"
+  # Reserved so it can't be removed/altered via the API, since the
+  # dashboard depends on it for its own backend authentication.
   reserved: true
+  # Human-readable note identifying this as the RAM v2 dashboard service
+  # account.
   description: "RAM v2 kibanaserver user"
 
+# Demo read-only user retained from the upstream Wazuh sample config, kept
+# disabled/unused in normal operation but available for read-only testing.
 kibanaro:
+  # bcrypt hash for the demo kibanaro account.
   hash: "$2a$12$JJSXNfTowz7Uu5ttXfeYpeYE0arACvcwlPBStB1F.MI7f0U9Z4DGC"
+  # Not reserved, so it can be edited or removed via the security API/UI
+  # (unlike admin/kibanaserver above).
   reserved: false
+  # Backend roles granting Kibana/dashboard usage plus read-all index
+  # access.
   backend_roles:
   - "kibanauser"
   - "readall"
+  # Arbitrary example attributes demonstrating attribute-based access
+  # control (DLS/FLS) hooks; not used for any real permission logic here.
   attributes:
     attribute1: "value1"
     attribute2: "value2"
     attribute3: "value3"
+  # Human-readable note flagging this as a demo/sample account.
   description: "Demo kibanaro user"
 
+# Demo account intended for a Logstash pipeline to authenticate when
+# writing/reading data to the indexer.
 logstash:
+  # bcrypt hash for the demo logstash account.
   hash: "$2a$12$u1ShR4l4uBS3Uv59Pa2y5.1uQuZBrZtmNfqB3iM/.jL0XoV9sghS2"
+  # Not reserved; can be modified/removed since it's just a sample account.
   reserved: false
+  # Backend role granting whatever privileges are mapped to "logstash"
+  # (typically index write access for log ingestion).
   backend_roles:
   - "logstash"
+  # Human-readable note flagging this as a demo/sample account.
   description: "Demo logstash user"
 
+# Demo account with broad read access across all indices, useful for
+# reporting/analytics integrations that only need to read data.
 readall:
+  # bcrypt hash for the demo readall account.
   hash: "$2a$12$ae4ycwzwvLtZxwZ82RmiEunBbIPiAmGZduBAjKN0TXdwQFtCwARz2"
+  # Not reserved; can be modified/removed since it's just a sample account.
   reserved: false
+  # Backend role mapped to read-only privileges across indices.
   backend_roles:
   - "readall"
+  # Human-readable note flagging this as a demo/sample account.
   description: "Demo readall user"
 
+# Demo account scoped to snapshot/restore operations only, following the
+# principle of least privilege for backup automation.
 snapshotrestore:
+  # bcrypt hash for the demo snapshotrestore account.
   hash: "$2y$12$DpwmetHKwgYnorbgdvORCenv4NAK8cPUg8AI6pxLCuWf/ALc0.v7W"
+  # Not reserved; can be modified/removed since it's just a sample account.
   reserved: false
+  # Backend role mapped to snapshot/restore-only privileges (no general
+  # read/write access to index data).
   backend_roles:
   - "snapshotrestore"
+  # Human-readable note flagging this as a demo/sample account.
   description: "Demo snapshotrestore user"

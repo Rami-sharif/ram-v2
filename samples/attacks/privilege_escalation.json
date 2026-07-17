@@ -1,0 +1,20 @@
+{
+  "timestamp": "2026-07-14T09:20:00.000+0000",
+  "id": "1752481200.300003",
+  "location": "/var/log/auth.log",
+  "rule": {
+    "level": 12,
+    "description": "Successful sudo to root by unauthorized user.",
+    "id": "5402",
+    "groups": ["syslog", "sudo", "privilege_escalation"],
+    "mitre": { "id": ["T1548.003"], "tactic": ["Privilege Escalation"], "technique": ["Sudo and Sudo Caching"] }
+  },
+  "agent": { "id": "001", "name": "web-server-01", "ip": "10.0.0.5" },
+  "data": {
+    "srcuser": "www-data",
+    "dstuser": "root",
+    "command": "/bin/bash"
+  },
+  "full_log": "Jul 14 09:20:00 web-server-01 sudo: www-data : TTY=pts/0 ; PWD=/var/www/html ; USER=root ; COMMAND=/bin/bash",
+  "decoder": { "name": "sudo" }
+}

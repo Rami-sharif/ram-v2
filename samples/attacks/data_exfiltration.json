@@ -1,0 +1,21 @@
+{
+  "timestamp": "2026-07-14T09:35:00.000+0000",
+  "id": "1752482100.300006",
+  "location": "/var/log/netflow.log",
+  "rule": {
+    "level": 12,
+    "description": "Large outbound data transfer to untrusted external host.",
+    "id": "40201",
+    "groups": ["netflow", "exfiltration"],
+    "mitre": { "id": ["T1041"], "tactic": ["Exfiltration"], "technique": ["Exfiltration Over C2 Channel"] }
+  },
+  "agent": { "id": "003", "name": "file-server-02", "ip": "10.0.0.12" },
+  "data": {
+    "srcip": "10.0.0.12",
+    "dstip": "185.220.101.44",
+    "dstport": "443",
+    "bytes": "4831838208"
+  },
+  "full_log": "Jul 14 09:35:00 file-server-02 netflow: 10.0.0.12 -> 185.220.101.44:443 TCP 4.5 GiB in 11 min (baseline: 12 MiB/day)",
+  "decoder": { "name": "netflow" }
+}

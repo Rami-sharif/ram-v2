@@ -1,19 +1,29 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- TheHive/Play logback configuration: defines where and how log lines are written. -->
 <configuration debug="false">
 
+    <!-- Custom conversion word that lets the pattern below render colorized log levels on the console. -->
     <conversionRule conversionWord="coloredLevel"
                     converterClass="play.api.libs.logback.ColoredLevel"/>
 
+    <!-- File appender: writes application logs to disk with rotation. -->
     <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <!-- Active (currently written) log file path. -->
         <file>/var/log/thehive/application.log</file>
+        <!-- Rotate through a fixed set of numbered, gzip-compressed backup files. -->
         <rollingPolicy class="ch.qos.logback.core.rolling.FixedWindowRollingPolicy">
+            <!-- Naming pattern for rotated/compressed log files, numbered by index. -->
             <fileNamePattern>/var/log/thehive/application.%i.log.zip</fileNamePattern>
+            <!-- Lowest rotation index to use. -->
             <minIndex>1</minIndex>
+            <!-- Highest rotation index to keep before older files are discarded (keeps disk usage bounded). -->
             <maxIndex>10</maxIndex>
         </rollingPolicy>
+        <!-- Roll over to a new file once the active file reaches this size. -->
         <triggeringPolicy class="ch.qos.logback.core.rolling.SizeBasedTriggeringPolicy">
             <maxFileSize>10MB</maxFileSize>
         </triggeringPolicy>
+        <!-- Log line format for the file appender: timestamp, level, logger, thread, user/org context, trace id, message. -->
         <encoder>
             <pattern>%date [%level] from %logger in %thread %replace(\(%X{userId}@%X{organisation}\) ){'\(@\)
                 ',''}[%X{kamonTraceId}] %message%n%xException
@@ -21,7 +31,9 @@
         </encoder>
     </appender>
 
+    <!-- Console appender: writes application logs to stdout (captured by `docker logs`). -->
     <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <!-- Log line format for the console appender: like the file format but with colorized level and a truncated stack trace. -->
         <encoder>
             <pattern>%date %coloredLevel %logger{15} %replace(\(%X{userId}@%X{organisation}\) ){'\(@\)
                 ',''}[%X{kamonTraceId}] %message%n%xException{10}
@@ -29,29 +41,44 @@
         </encoder>
     </appender>
 
+    <!-- Async wrapper around the file appender so logging calls don't block on disk I/O. -->
     <appender name="ASYNCFILE" class="ch.qos.logback.classic.AsyncAppender">
         <appender-ref ref="FILE"/>
     </appender>
 
+    <!-- Async wrapper around the console appender so logging calls don't block on stdout I/O. -->
     <appender name="ASYNCSTDOUT" class="ch.qos.logback.classic.AsyncAppender">
         <appender-ref ref="STDOUT"/>
     </appender>
 
     <!-- do not set the following logger to TRACE -->
+    <!-- Traversal logger: kept at INFO because TRACE here is extremely noisy (per-step graph traversal logging). -->
     <logger name="org.thp.scalligraph.traversal" level="INFO"/>
+    <!-- Reflections library (classpath scanning): only log actual errors, its INFO/DEBUG output is noisy and low-value. -->
     <logger name="org.reflections.Reflections" level="ERROR"/>
+    <!-- JanusGraph schema-management logger: silenced entirely, its logging is internal bookkeeping noise. -->
     <logger name="org.janusgraph.graphdb.database.management.ManagementLogger" level="OFF"/>
+    <!-- JanusGraph index serializer: only log actual errors. -->
     <logger name="org.janusgraph.graphdb.database.IndexSerializer" level="ERROR"/>
+    <!-- Kafka client (used internally by TheHive/JanusGraph): only warnings and above, to reduce noise. -->
     <logger name="org.apache.kafka" level="WARN"/>
+    <!-- docx4j (document generation, e.g. report export): only warnings and above. -->
     <logger name="org.docx4j" level="WARN"/>
+    <!-- docx4j property resolver: silenced entirely, purely internal noise. -->
     <logger name="org.docx4j.model.PropertyResolver" level="OFF" />
     <!-- Log Elasticsearch requests -->
+    <!-- Disabled by default (commented out): flip to TRACE only when debugging ES query issues, since it's very verbose. -->
     <!--<logger name="org.janusgraph.diskstorage.es.rest.RestElasticSearchClient" level="TRACE"/>-->
+    <!-- TheHive's own data-model logger: INFO is the normal operating verbosity. -->
     <logger name="org.thp.scalligraph.models" level="INFO"/>
+    <!-- Catch-all for the rest of TheHive's own code (org.thp.*): INFO is the normal operating verbosity. -->
     <logger name="org.thp" level="INFO"/>
 
+    <!-- Root logger: applies to everything not matched by a more specific logger above. -->
     <root level="INFO">
+        <!-- Send root-level logs to the file, via the async wrapper. -->
         <appender-ref ref="ASYNCFILE"/>
+        <!-- Also send root-level logs to the console, via the async wrapper. -->
         <appender-ref ref="ASYNCSTDOUT"/>
     </root>
 

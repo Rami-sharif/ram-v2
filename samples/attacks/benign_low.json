@@ -1,0 +1,20 @@
+{
+  "timestamp": "2026-07-14T09:40:00.000+0000",
+  "id": "1752482400.300007",
+  "location": "/var/log/auth.log",
+  "rule": {
+    "level": 3,
+    "description": "sshd: authentication success from known internal admin workstation.",
+    "id": "5715",
+    "groups": ["syslog", "sshd", "authentication_success"],
+    "mitre": { "id": ["T1078"], "tactic": ["Persistence"], "technique": ["Valid Accounts"] }
+  },
+  "agent": { "id": "001", "name": "web-server-01", "ip": "10.0.0.5" },
+  "data": {
+    "srcip": "10.0.0.31",
+    "srcport": "49122",
+    "dstuser": "sysadmin"
+  },
+  "full_log": "Jul 14 09:40:00 web-server-01 sshd[22110]: Accepted publickey for sysadmin from 10.0.0.31 port 49122 ssh2: RSA SHA256:kQ2v...",
+  "decoder": { "name": "sshd" }
+}

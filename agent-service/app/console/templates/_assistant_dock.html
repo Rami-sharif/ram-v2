@@ -1,53 +1,81 @@
+<!-- Semi-transparent backdrop shown behind the dock when it's open; hidden by default,
+     toggled by console.js alongside the dock's open/close state -->
 <div id="assistant-backdrop" class="assistant-backdrop" hidden></div>
+<!-- The floating assistant panel itself; starts aria-hidden until toggled open by console.js -->
 <aside id="assistant-dock" class="assistant-dock" aria-hidden="true" aria-label="Assistant">
   <div class="dock-head">
+    <!-- Dock title -->
     <h2>Assistant</h2>
     <div class="dock-head-actions">
+      <!-- Starts a brand-new conversation: POSTs to create one, then swaps the whole #chat-log
+           element (outerHTML) with the freshly created empty chat -->
       <button type="button" class="secondary chip" id="dock-new-chat"
               hx-post="/console/conversations" hx-target="#chat-log" hx-swap="outerHTML"
               title="Start a new chat">+ new chat</button>
+      <!-- Link out to the full-screen agent page for users who want more room -->
       <a class="chip" href="/console/agent" title="Open full agent page">↗ full page</a>
+      <!-- Close button for the dock; console.js wires this to hide the dock/backdrop -->
       <button type="button" class="icon-btn" id="assistant-close" aria-label="Close assistant">✕</button>
     </div>
   </div>
+  <!-- If a specific case/alert is the current chat context, show which one and a usage hint -->
   {% if chat_context %}
   <p class="chat-context">Asking about <b>{{ chat_context.label }}</b>
     <span class="muted note">— say “this alert” and the assistant knows which one.</span></p>
   {% else %}
-  <p class="muted note">Most-recent chat. Ask about any case by number, compare cases, pivot on an
-    indicator, or query the logs. Manage all chats on the <a href="/console/agent">full page</a>.</p>
+  <!-- Generic hint shown when the dock isn't scoped to a specific case -->
+  <p class="muted note">Latest chat. Ask about any case by number, compare cases, look up an IP or
+    hash, or search the logs. Manage all chats on the <a href="/console/agent">full page</a>.</p>
   {% endif %}
 
+  <!-- Chat message container; lazily loads the conversation once, the first time the dock opens
+       ("dockopen once" — the htmx trigger only fires a single time per page load), then replaces
+       itself entirely with the loaded log -->
   <div id="chat-log" class="chat-log"
        hx-get="/console/assistant" hx-trigger="dockopen once" hx-swap="outerHTML">
-    <p class="muted chat-empty">Open to load your assistant thread…</p>
+    <!-- Placeholder shown before the lazy load fires -->
+    <p class="muted chat-empty">Open to load your chat…</p>
   </div>
 
+  <!-- Row of quick-fill suggestion chips; clicking one populates the message textarea
+       (handled by console.js via the data-fill-prompt attribute) -->
   <div class="chat-prompts">
+    <!-- Case-scoped quick prompts, shown only when this dock is tied to a specific alert/case -->
     {% if chat_context %}
     <button type="button" class="secondary chip" data-fill-prompt="Is this alert a real threat? Explain your reasoning.">is it real?</button>
     <button type="button" class="secondary chip" data-fill-prompt="Has this source IP or host appeared in any other case?">seen before?</button>
     <button type="button" class="secondary chip" data-fill-prompt="What should I do next with this alert?">next steps</button>
     {% else %}
+    <!-- Generic quick prompts shown when there's no specific case context -->
     <button type="button" class="secondary chip" data-fill-prompt="Summarize the latest high-severity alerts and note any overlaps.">brief overview</button>
     <button type="button" class="secondary chip" data-fill-prompt="Compare the source IPs and case numbers for the latest flagged alerts.">compare cases</button>
     <button type="button" class="secondary chip" data-fill-prompt="Find the most recent case linked to the same host and summarize it.">host pivot</button>
     {% endif %}
   </div>
 
+  <!-- The message-send form -->
   <form class="chat-form"
         hx-post="/console/chat"
         hx-target="#chat-log" hx-swap="beforeend"
         hx-vals='js:{conversation_id: document.getElementById("chat-log")?.dataset.conversationId || ""}'
         hx-on::after-request="if(event.detail.successful){this.reset();var e=document.getElementById('chat-empty');if(e)e.remove();}">
+    <!-- htmx-post to /console/chat sends the message; hx-target/hx-swap append the response
+         (new message bubble(s)) to the end of #chat-log rather than replacing it;
+         hx-vals reads the current conversation id off the chat-log's dataset so replies land
+         in the right thread; hx-on::after-request resets the form and removes the "no messages
+         yet" placeholder once the first message succeeds -->
+    <!-- Hidden field carrying which investigation this chat is scoped to, when applicable -->
     {% if chat_context %}
     <input type="hidden" name="investigation_id" value="{{ chat_context.investigation_id }}">
     {% endif %}
+    <!-- Message textarea; placeholder adapts to whether a case context is active -->
     <textarea name="message" rows="2" required
       placeholder="{% if chat_context %}Ask about {{ chat_context.label }}…{% else %}Ask the assistant… (Enter to send, Shift+Enter for a newline){% endif %}"></textarea>
+    <!-- Submit button that triggers the hx-post above -->
     <button type="submit">Send</button>
   </form>
-  <p class="muted note">The assistant may take audited actions (verdict, triage feedback, case
-    close / severity / comment) on a case you name; each is attributed to
-    {{ analyst.username }} and written to the audit log.</p>
+  <!-- Disclosure note reminding the analyst that assistant actions are audited and attributed to them -->
+  <p class="muted note">The assistant can do logged actions (decision, sorting feedback, close a case /
+    set severity / add a comment) on a case you name. Each is saved under
+    {{ analyst.username }} and written to the activity log.</p>
 </aside>

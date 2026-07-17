@@ -1,10 +1,17 @@
 {# The scroll container + the active conversation id the chat form posts back to.
    Swapped via outerHTML so switching/creating a chat updates data-conversation-id. #}
+<!-- Chat log scroll container; data-conversation-id lets console.js/htmx know which conversation
+     to post new messages to, and gets replaced wholesale (outerHTML) on chat switch/new chat -->
 <div id="chat-log" class="chat-log" data-conversation-id="{{ conversation.id }}">
+  <!-- Only render the message list if there are messages, otherwise show the empty-state hint -->
   {% if messages %}
+    <!-- Delegate rendering of the actual message bubbles to the shared partial, keeping the
+         message-rendering logic in one place (used from both the dock and the full agent page) -->
     {% include "_chat_messages.html" %}
   {% else %}
-    <p class="muted chat-empty" id="chat-empty">No messages yet. Ask about any recorded case,
-      check whether an IP or hash appeared elsewhere, or request an audited action on a case.</p>
+    <!-- Empty-state message shown before any chat activity; id used by JS to remove it once the
+         first message is sent (see hx-on::after-request in the chat form) -->
+    <p class="muted chat-empty" id="chat-empty">No messages yet. Ask about any saved case,
+      check whether an IP or hash showed up elsewhere, or ask for a logged action on a case.</p>
   {% endif %}
 </div>

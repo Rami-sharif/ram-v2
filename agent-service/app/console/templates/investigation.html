@@ -1,70 +1,102 @@
+<!-- Inherit the shared console shell from base.html -->
 {% extends "base.html" %}
+<!-- Browser tab title, includes the investigation id -->
 {% block title %}Investigation #{{ inv.id }} · RAM v2{% endblock %}
+<!-- Main page content -->
 {% block content %}
-<p><a href="/console/queue">← Triage queue</a></p>
+<!-- Back-link to the triage queue -->
+<p><a href="/console/queue">← Alert queue</a></p>
 <div class="page-head">
+  <!-- Status readout summarizing case number, severity, and triage route -->
   <div class="readout">
+    <!-- TheHive case number, falling back to the internal investigation id if uncased -->
     <span>case <b>#{{ inv.case_number or inv.id }}</b></span>
+    <!-- Severity label, or "unknown" if not set -->
     <span>priority <b>{{ inv.severity_label or 'unknown' }}</b></span>
-    <span>route <b>{{ inv.triage_action or '—' }}</b></span>
+    <!-- Triage action/route this alert was sent down -->
+    <span>action <b>{{ inv.triage_action | action_label }}</b></span>
   </div>
+  <!-- Page heading -->
   <h1>Investigation #{{ inv.id }}</h1>
-  <p class="muted">The agent output is immutable; the analyst actions below layer on top with audit trails and clear next steps.</p>
+  <!-- Explanatory copy: agent output is immutable, analyst actions layer on top -->
+  <p class="muted">The agent's result can't be changed. Your actions below are added on top, each one saved to the log with clear next steps.</p>
 </div>
 
+<!-- Only show this "missing case" recovery panel when there is no linked TheHive case yet
+     AND triage attempted/intended to create one -->
 {% if not inv.case_id and inv.triage_action in ('create_flagged', 'create_open', 'suppress_duplicate') %}
 <section class="card case-missing">
   <div class="panel-head">
     <h2>No TheHive case for this alert</h2>
-    <span class="tag tag-bad">{% if inv.suppressed %}duplicate of a case that was never created{% else %}case creation failed{% endif %}</span>
+    <!-- Badge explaining why there's no case: either it's a duplicate of an uncreated case,
+         or case creation itself failed -->
+    <span class="tag tag-bad">{% if inv.suppressed %}duplicate of a case that was never made{% else %}could not make the case{% endif %}</span>
   </div>
+  <!-- Explain the duplicate-suppression scenario, including the group this alert was merged into -->
   {% if inv.suppressed %}
-  <p>Triage suppressed this alert as a duplicate (occurrence ×{{ inv.occurrence_count }}) and merged it
+  <p>The system saw this alert as a duplicate (seen ×{{ inv.occurrence_count }} times) and merged it
      into the case for <span class="mono">{{ inv.agent_name }} · rule {{ inv.rule_id }} · {{ inv.source_ip }}</span>
-     — but that case creation had failed, so it was merged into nothing.</p>
+     — but that case was never made, so it merged into nothing.</p>
   {% else %}
-  <p>Triage routed this alert to <strong>{{ inv.triage_action }}</strong>, but TheHive did not accept
-     the case, so nothing was ever linked. The analysis above is unaffected — only the case is missing.</p>
+  <!-- Explain the plain case-creation-failed scenario -->
+  <p>The system sent this alert to <strong>{{ inv.triage_action | action_label }}</strong>, but TheHive did not accept
+     the case, so nothing was linked. The result above is fine — only the case is missing.</p>
   {% endif %}
+  <!-- Show the raw case-creation error, if one was recorded -->
   {% if inv.case_error %}<pre class="block err">{{ inv.case_error }}</pre>{% endif %}
 
+  <!-- If a sibling alert in the same dedup group already has a case, offer to link this one to it
+       instead of creating a new (duplicate) case -->
   {% if parent_case %}
   <p>This alert's group now has a case:
      <a href="{{ parent_case.url }}" target="_blank" rel="noopener">#{{ parent_case.case_number }}</a>.</p>
+  <!-- Form that links this investigation to the existing parent case -->
   <form method="post" action="/console/investigations/{{ inv.id }}/case/link" class="inline">
     <button type="submit">Link to case #{{ parent_case.case_number }}</button>
   </form>
-  <p class="muted note">Duplicates of one alert belong in one case, so this links to the existing case
-     rather than creating a second one. Attributed to {{ analyst.username }} and audited.</p>
+  <p class="muted note">Repeat alerts belong in one case, so this links to the case that already exists
+     instead of making a second one. Saved under {{ analyst.username }} and logged.</p>
+  <!-- Otherwise, if the original alert payload was recorded, allow the analyst to retry case creation -->
   {% elif can_retry_case %}
   <form method="post" action="/console/investigations/{{ inv.id }}/case/create" class="inline">
-    <button type="submit">Create TheHive case</button>
+    <button type="submit">Make TheHive case</button>
   </form>
-  <p class="muted note">Creates the case triage intended — same alert, analysis, enrichment and
-     {% if inv.triage_branch == 'high' %}escalation flag{% else %}needs-review tag{% endif %}.
-     Every other alert in this dedup group then resolves to it. Attributed to {{ analyst.username }}
-     and audited.</p>
+  <!-- Explain what retrying will do, including which escalation/tag branch applies -->
+  <p class="muted note">Makes the case the system meant to make — same alert, result, extra info and
+     {% if inv.triage_branch == 'high' %}urgent flag{% else %}needs-review tag{% endif %}.
+     Every other repeat of this alert then points to it. Saved under {{ analyst.username }}
+     and logged.</p>
   {% else %}
-  <p class="muted note">This one cannot be recovered automatically: no case exists for its group, and the
-     alert payload needed to rebuild one was not recorded (it predates case-retry support). Create the
-     case directly in TheHive.</p>
+  <!-- Last-resort case: nothing to link to and no retry data available, so must be created manually -->
+  <p class="muted note">This one can't be fixed automatically: there's no case for it, and the alert
+     data needed to rebuild one wasn't saved. Please make the case directly in TheHive.</p>
   {% endif %}
 </section>
 {% endif %}
 
+<!-- Two-column layout: case snapshot facts + quick action shortcuts -->
 <div class="detail-grid">
   <section class="card">
     <div class="panel-head">
       <h2>Case snapshot</h2>
-      <span class="tag">{{ inv.triage_action or '—' }}</span>
+      <!-- Triage action tag repeated here for quick reference -->
+      <span class="tag">{{ inv.triage_action | action_label }}</span>
     </div>
+    <!-- Key/value grid of the alert's core identifying facts -->
     <div class="kv">
+      <!-- Alert id, click-to-copy when present -->
       <span>Alert id</span><span class="mono">{% if inv.alert_id %}<span class="copyable" data-copy="{{ inv.alert_id }}" title="click to copy">{{ inv.alert_id }}</span>{% else %}—{% endif %}</span>
+      <!-- When this investigation record was created, with timezone -->
       <span>Recorded</span><span class="muted">{{ inv.created_at.strftime('%Y-%m-%d %H:%M:%S %Z') }}</span>
+      <!-- Host/agent name -->
       <span>Host</span><span>{{ inv.agent_name or '—' }}</span>
+      <!-- Source IP, click-to-copy when present -->
       <span>Source IP</span><span class="mono">{% if inv.source_ip %}<span class="copyable" data-copy="{{ inv.source_ip }}" title="click to copy">{{ inv.source_ip }}</span>{% else %}—{% endif %}</span>
+      <!-- Detection rule id -->
       <span>Rule</span><span class="mono">{{ inv.rule_id or '—' }}</span>
       <span>TheHive case</span>
+      <!-- Link to the TheHive case if a URL is known; show who linked it (when linked manually
+           rather than created by triage) with a tooltip explaining the distinction -->
       <span>{% if case_url %}<a href="{{ case_url }}" target="_blank" rel="noopener">#{{ inv.case_number or 'open in TheHive' }}</a>{% if case_link %}<span class="tag" title="linked by {{ case_link.actor_username }} on {{ case_link.created_at.strftime('%Y-%m-%d %H:%M') }} — triage did not create this case">linked by {{ case_link.actor_username }}</span>{% endif %}{% else %}—{% endif %}</span>
     </div>
   </section>
@@ -74,23 +106,42 @@
       <h2>Quick actions</h2>
     </div>
     <div class="action-stack">
+      <!-- Shortcut back to the queue -->
       <a class="action-tile" href="/console/queue">Jump to queue</a>
+      <!-- Shortcut to open the linked TheHive case in a new tab, only if one exists -->
       {% if case_url %}<a class="action-tile" href="{{ case_url }}" target="_blank" rel="noopener">Open TheHive case</a>{% endif %}
+      <!-- Jump-link (in-page anchor) down to the analyst actions section -->
       <a class="action-tile" href="#analyst-actions">Review analyst actions</a>
+      <!-- Opens the floating assistant dock pre-scoped to this case; data-open-assistant is
+           picked up by console.js to trigger the dock and pass along this investigation's context -->
       <button type="button" class="action-tile" data-open-assistant>Ask assistant about this case</button>
+      <!-- Delete this investigation and its layered verdict/feedback. Audited first (see the
+           router); confirm() guards against an accidental click. Redirects back to the queue. -->
+      <form method="post" action="/console/investigations/{{ inv.id }}/delete"
+            onsubmit="return confirm('Delete investigation #{{ inv.id }}? This removes the agent output and any verdict or feedback recorded on it, and cannot be undone.')">
+        <!-- No queue query string on this page, so leave `back` empty — the router falls back to the plain queue -->
+        <input type="hidden" name="back" value="">
+        <button type="submit" class="action-tile danger-tile">Delete investigation</button>
+      </form>
     </div>
   </section>
 </div>
 
-<h2>Agent verdict <span class="muted note">(write-once, immutable)</span></h2>
+<!-- Section: the agent's original verdict, explicitly noted as write-once/immutable -->
+<h2>Agent decision <span class="muted note">(saved once, can't be changed)</span></h2>
 <section class="card">
+  <!-- Severity badge, numeric score, and classified attack type -->
   <p><span class="sev sev-{{ inv.severity_label }}">{{ inv.severity_label }}</span>
      <span class="muted">score {{ inv.severity_score }}</span>
      &nbsp;·&nbsp; attack type: <strong>{{ inv.attack_type or '—' }}</strong></p>
+  <!-- Free-text summary the agent produced -->
   <p><strong>Summary.</strong> {{ inv.analysis.summary or '—' }}</p>
+  <!-- Agent's recommended next action -->
   <p><strong>Recommended action.</strong> {{ inv.analysis.recommended_action or '—' }}</p>
+  <!-- Only show MITRE ATT&CK mapping if the agent identified any techniques -->
   {% if inv.analysis.mitre %}
   <p><strong>MITRE.</strong>
+    <!-- One tag per MITRE technique, with the technique name shown if available -->
     {% for m in inv.analysis.mitre %}
       <span class="tag">{{ m.technique_id }}{% if m.technique %} · {{ m.technique }}{% endif %}</span>
     {% endfor %}
@@ -98,20 +149,27 @@
   {% endif %}
 </section>
 
-<h2>Triage decision</h2>
+<!-- Section: how triage routed this alert -->
+<h2>How it was sorted</h2>
 <section class="card">
-  <p><span class="tag">{{ inv.triage_action or '—' }}</span>
-     <span class="muted">branch: {{ inv.triage_branch or '—' }}</span>
-     {% if inv.suppressed %}<span class="tag tag-mute">suppressed duplicate</span>{% endif %}
-     {% if inv.occurrence_count %}<span class="muted">· occurrence ×{{ inv.occurrence_count }}</span>{% endif %}
+  <!-- Triage action tag, branch label, and suppression/occurrence context -->
+  <p><span class="tag">{{ inv.triage_action | action_label }}</span>
+     <span class="muted">level: {{ inv.triage_branch or '—' }}</span>
+     {% if inv.suppressed %}<span class="tag tag-mute">merged duplicate</span>{% endif %}
+     {% if inv.occurrence_count %}<span class="muted">· seen ×{{ inv.occurrence_count }} times</span>{% endif %}
   </p>
 </section>
 
-<h2>Memory context</h2>
+<!-- Section: the memory/context the agent had available when it investigated this alert -->
+<h2>What the agent knew (memory)</h2>
 <section class="card">
-  <pre class="block">{{ inv.memory_context or 'No prior context.' }}</pre>
+  <!-- Raw memory-context text block the agent was given, or a fallback message -->
+  <pre class="block">{{ inv.memory_context or 'No past alerts to go on.' }}</pre>
+  <!-- Only show the retrieved-memory reference list if any memory ids were retrieved -->
   {% if retrieved %}
-  <p class="muted">Retrieved memory (snapshot taken when this alert was investigated):
+  <p class="muted">Related past alerts it found (as of when it checked this one):
+    <!-- Link each retrieved memory id to its detail page if it still exists, otherwise show a
+         "deleted / not found" tag since memories can be deleted after the fact -->
     {% for r in retrieved %}
       {% if r.exists %}<a href="/console/memory/{{ r.id }}">#{{ r.id }}</a>{% else %}<span class="tag tag-mute" title="referenced by this investigation but no longer in the memory store">#{{ r.id }} · deleted / not found</span>{% endif %}{% if not loop.last %} {% endif %}
     {% endfor %}
@@ -119,75 +177,101 @@
   {% endif %}
 </section>
 
-<h2>Tool-call trace <span class="muted note">({{ inv.tool_trace | length }} step(s))</span></h2>
+<!-- Section: full step-by-step trace of tools the agent called while investigating -->
+<h2>What the agent did <span class="muted note">({{ inv.tool_trace | length }} step(s))</span></h2>
 <section class="card">
+  <!-- Only render the trace list if any tool calls were recorded -->
   {% if inv.tool_trace %}
   <ol class="trace">
+    <!-- One list item per tool-call step, in order -->
     {% for step in inv.tool_trace %}
     <li>
+      <!-- Name of the tool invoked -->
       <code class="tool">{{ step.tool }}</code>
+      <!-- Which iteration of the agent loop this call happened in -->
       <span class="muted">iter {{ step.iteration }}</span>
+      <!-- Error badge if this specific step failed -->
       {% if step.error %}<span class="sev sev-high">error</span>{% endif %}
+      <!-- The agent's stated reasoning for making this call, if recorded -->
       {% if step.reason %}<div class="reason">{{ step.reason }}</div>{% endif %}
+      <!-- Pretty-printed JSON of the call arguments, if any were passed -->
       {% if step.args %}<pre class="block">{{ step.args | tojson(indent=2) }}</pre>{% endif %}
+      <!-- Raw error text for this step, if it failed -->
       {% if step.error %}<pre class="block err">{{ step.error }}</pre>{% endif %}
     </li>
     {% endfor %}
   </ol>
   {% else %}
+  <!-- Empty state: no tools were invoked for this alert -->
   <p class="muted">No tools were called for this alert.</p>
   {% endif %}
 </section>
 
-<h2>Analyst actions <span class="muted note">(taken as {{ analyst.username }} — every action is audited)</span></h2>
+<!-- Section: forms for the analyst to take audited actions on this investigation -->
+<h2>Your actions <span class="muted note">(done as {{ analyst.username }} — every action is logged)</span></h2>
 <section class="card actions" id="analyst-actions">
   <div class="action-block">
-    <h3>Verdict</h3>
+    <h3>Decision</h3>
+    <!-- Confirm form: agrees with the agent's original verdict, with an optional reason -->
     <form method="post" action="/console/investigations/{{ inv.id }}/verdict" class="inline">
+      <!-- Hidden field marking this submission as a "confirm" action -->
       <input type="hidden" name="action" value="confirm">
       <input type="text" name="reason" placeholder="reason (optional)">
-      <button type="submit">Confirm agent verdict</button>
+      <button type="submit">Agree with agent</button>
     </form>
+    <!-- Override form: lets the analyst replace severity/attack type with their own judgement -->
     <form method="post" action="/console/investigations/{{ inv.id }}/verdict" class="row">
+      <!-- Hidden field marking this submission as an "override" action -->
       <input type="hidden" name="action" value="override">
+      <!-- New severity label chosen by the analyst -->
       <select name="severity_label">
         <option value="">— severity —</option>
         {% for s in severity_labels %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
       </select>
+      <!-- New numeric severity score, bounded 0-100 -->
       <input type="number" name="severity_score" min="0" max="100" placeholder="score">
+      <!-- New attack type classification -->
       <input type="text" name="attack_type" placeholder="attack type">
-      <input type="text" name="reason" placeholder="why override?">
-      <button type="submit">Override verdict</button>
+      <!-- Free-text justification for the override -->
+      <input type="text" name="reason" placeholder="why change it?">
+      <button type="submit">Change decision</button>
     </form>
   </div>
 
   <div class="action-block">
-    <h3>Triage feedback</h3>
+    <h3>Was the sorting right?</h3>
+    <!-- Form recording whether the triage routing decision itself was correct, independent of severity -->
     <form method="post" action="/console/investigations/{{ inv.id }}/feedback" class="row">
       <select name="rating">
-        <option value="correct">triage correct</option>
-        <option value="incorrect">triage incorrect</option>
+        <option value="correct">sorting was right</option>
+        <option value="incorrect">sorting was wrong</option>
       </select>
       <input type="text" name="reason" placeholder="reason (optional)">
-      <button type="submit">Submit feedback</button>
+      <button type="submit">Send feedback</button>
     </form>
   </div>
 
+  <!-- TheHive case actions block; header notes when there's no case to act on -->
   <div class="action-block">
     <h3>TheHive case {% if not case_url %}<span class="muted">(no linked case)</span>{% endif %}</h3>
+    <!-- Only render the case-management forms when a case is actually linked -->
     {% if case_url %}
+    <!-- Form to change the case's severity in TheHive -->
     <form method="post" action="/console/investigations/{{ inv.id }}/case/severity" class="row">
       <select name="severity_label">
         {% for s in severity_labels %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
       </select>
       <button type="submit">Set case severity</button>
     </form>
+    <!-- Form to post a free-text comment onto the TheHive case -->
     <form method="post" action="/console/investigations/{{ inv.id }}/case/comment" class="row">
       <input type="text" name="message" placeholder="comment to add in TheHive" style="min-width:320px">
       <button type="submit">Add comment</button>
     </form>
+    <!-- Form to close the case; confirm() guards against accidental closure -->
     <form method="post" action="/console/investigations/{{ inv.id }}/case/close" class="row"
           onsubmit="return confirm('Close this case in TheHive?')">
+      <!-- Resolution/closing status dropdown, populated from server-provided valid statuses -->
       <select name="resolution">
         {% for r in close_statuses %}<option value="{{ r }}">{{ r }}</option>{% endfor %}
       </select>
@@ -198,30 +282,39 @@
   </div>
 </section>
 
-<h2>Analyst input history <span class="muted note">(layered on top of the immutable agent output)</span></h2>
+<!-- Section: read-only history of all analyst actions taken so far, layered on the immutable output -->
+<h2>Your saved actions <span class="muted note">(added on top of the agent's result)</span></h2>
 <section class="card">
-  <h3>Verdict reviews</h3>
+  <h3>Decisions</h3>
+  <!-- Only render the list if there's at least one recorded review -->
   {% if reviews %}
   <ul class="layered">
+    <!-- One entry per verdict review (confirm or override), most relevant first -->
     {% for r in reviews %}
     <li><strong>{{ r.action }}</strong> by {{ r.actor_username }}
       <span class="muted">{{ r.created_at.strftime('%Y-%m-%d %H:%M') }}</span>
+      <!-- Optional free-text reason given for this review -->
       {% if r.reason %}— {{ r.reason }}{% endif %}
+      <!-- Pretty-printed JSON of what was overridden, if this was an override action -->
       {% if r.override_payload %}<pre class="block">{{ r.override_payload | tojson(indent=2) }}</pre>{% endif %}
     </li>
     {% endfor %}
   </ul>
   {% else %}<p class="muted">None.</p>{% endif %}
 
-  <h3>Triage feedback</h3>
+  <h3>Sorting feedback</h3>
+  <!-- Only render the list if there's at least one recorded feedback entry -->
   {% if feedback %}
   <ul class="layered">
+    <!-- One entry per triage feedback submission -->
     {% for f in feedback %}
     <li><strong>{{ f.rating }}</strong> by {{ f.actor_username }}
       <span class="muted">{{ f.created_at.strftime('%Y-%m-%d %H:%M') }}</span>
+      <!-- Optional free-text reason given for this rating -->
       {% if f.reason %}— {{ f.reason }}{% endif %}</li>
     {% endfor %}
   </ul>
   {% else %}<p class="muted">None.</p>{% endif %}
 </section>
+<!-- Close the content block -->
 {% endblock %}

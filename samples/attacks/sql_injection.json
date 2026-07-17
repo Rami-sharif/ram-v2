@@ -1,0 +1,21 @@
+{
+  "timestamp": "2026-07-14T09:10:00.000+0000",
+  "id": "1752480600.300001",
+  "location": "/var/log/nginx/access.log",
+  "rule": {
+    "level": 12,
+    "description": "SQL injection attempt against web application.",
+    "id": "31103",
+    "groups": ["web", "attack", "sql_injection"],
+    "mitre": { "id": ["T1190"], "tactic": ["Initial Access"], "technique": ["Exploit Public-Facing Application"] }
+  },
+  "agent": { "id": "001", "name": "web-server-01", "ip": "10.0.0.5" },
+  "data": {
+    "srcip": "45.155.205.233",
+    "url": "/product.php?id=1' UNION SELECT username,password FROM users--",
+    "protocol": "GET",
+    "id": "200"
+  },
+  "full_log": "45.155.205.233 - - [14/Jul/2026:09:10:00 +0000] \"GET /product.php?id=1'%20UNION%20SELECT%20username,password%20FROM%20users-- HTTP/1.1\" 200 5122 \"-\" \"sqlmap/1.7\"",
+  "decoder": { "name": "web-accesslog" }
+}

@@ -1,13 +1,25 @@
+<!-- Inherit the shared page shell from base.html (note: base.html hides the topbar when
+     there's no `analyst` in context, so the login page renders as a bare centered card) -->
 {% extends "base.html" %}
+<!-- Browser tab title for the login page -->
 {% block title %}Login · RAM v2 Console{% endblock %}
+<!-- Login page content -->
 {% block content %}
+<!-- Centered card wrapper that styles the login form -->
 <div class="login-card">
+  <!-- Console/product name heading -->
   <h1>RAM v2 Console</h1>
+  <!-- Render a login error (e.g. bad credentials) only if the view passed one in -->
   {% if error %}<p class="error">{{ error }}</p>{% endif %}
+  <!-- Plain (non-htmx) POST form so a full page navigation happens on submit/redirect -->
   <form method="post" action="/console/login">
+    <!-- Username field: autofocus for immediate typing, required, browser autofill hint -->
     <label>Username <input name="username" autocomplete="username" autofocus required></label>
+    <!-- Password field: masked input, autofill hint for password managers, required -->
     <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+    <!-- Submit button that posts the credentials -->
     <button type="submit">Sign in</button>
   </form>
 </div>
+<!-- Close the content block -->
 {% endblock %}
