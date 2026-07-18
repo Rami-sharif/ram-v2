@@ -130,6 +130,34 @@ def overview(request: Request, analyst: dict = Depends(require_analyst)):
     })
 
 
+# Named time windows offered by the metrics dashboard; value is hours (None = all-time).
+_METRIC_WINDOWS = {"24h": 24.0, "7d": 168.0, "30d": 720.0, "all": None}
+
+
+@protected.get("/metrics", response_class=HTMLResponse)
+def metrics_dashboard(request: Request, window: str = "7d",
+                      analyst: dict = Depends(require_analyst)):
+    """Read-only operational metrics over the write-once record: investigation latency
+    (p50/p95), iteration/cap usage, tool-call failure rates, Gemini fallback frequency, and
+    the Part-A dedup-gate hit rate. Every query is SELECT-only — no writes anywhere."""
+    if window not in _METRIC_WINDOWS:
+        window = "7d"  # ignore a bogus ?window= value rather than erroring
+    hours = _METRIC_WINDOWS[window]
+    cap = get_settings().agent_max_iterations  # for the "hit the iteration cap" metric
+    iterations = store.metrics_iterations(hours, cap=cap)
+    # Largest bucket count, so the template can size the distribution bars proportionally.
+    iter_max = max((d["n"] for d in iterations["distribution"]), default=1) or 1
+    return templates.TemplateResponse(request, "metrics.html", {
+        "analyst": analyst, "nav": "metrics", "window": window,
+        "windows": list(_METRIC_WINDOWS.keys()),
+        "summary": store.metrics_summary(hours),
+        "latency": store.metrics_latency(hours),
+        "iterations": iterations, "iter_max": iter_max,
+        "tool_failures": store.metrics_tool_failures(hours),
+        "msg": request.query_params.get("msg"), "err": request.query_params.get("err"),
+    })
+
+
 # The triage queue: a filterable, paginated list of alerts. Each Query(...) param
 # is read from the URL's query string, e.g. /console/queue?severity=high&page=2.
 # Query(None) means "optional, default None"; Query(1, ge=1) means "default 1, and

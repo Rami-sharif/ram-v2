@@ -17,6 +17,8 @@ Beginner orientation:
 """
 # Standard logging module, used throughout for structured status/error logs.
 import logging
+# perf_counter: monotonic wall-clock timer used to record per-alert pipeline latency.
+import time
 # Any for loosely-typed JSON payloads (the raw webhook body).
 from typing import Any
 
@@ -103,6 +105,92 @@ def normalize_alert(payload: dict[str, Any]) -> WazuhAlert:
     return WazuhAlert.model_validate(payload)
 
 
+# --------------------------------------------------------------------------- #
+# Pre-agent dedup gate: skip the whole investigation (agent + embedding) when an
+# identical alert was already investigated moments ago, recording a lightweight
+# duplicate that reuses the prior verdict. See config.dedup_gate_* and Part A.
+# --------------------------------------------------------------------------- #
+def _record_gated_duplicate(alert: WazuhAlert, parent: dict[str, Any],
+                            source_ip: str, t0: float) -> WebhookResponse:
+    """Persist a lightweight duplicate that reuses `parent`'s verdict (no agent, no memory),
+    and return a response echoing that verdict. A normal INSERT — write-once is untouched."""
+    s = get_settings()
+    parent_analysis = parent.get("analysis") or {}
+    # Reuse the parent verdict, dropping its explanation blob (belongs to the parent) and
+    # stamping gate markers so the console and Part B metrics can identify a gated duplicate.
+    analysis_json = dict(parent_analysis)
+    analysis_json.pop("explanation", None)
+    analysis_json["gate_deduped"] = True
+    analysis_json["gate_parent_investigation_id"] = parent["id"]
+    analysis_json["gate_window_minutes"] = s.dedup_gate_window_minutes
+    # Make the reused nature explicit in the summary the analyst reads.
+    analysis_json["summary"] = (
+        f"[Auto-deduplicated: same host, rule and source IP as investigation "
+        f"#{parent['id']} within {s.dedup_gate_window_minutes:g} min — agent skipped, prior "
+        f"verdict reused.] " + (parent_analysis.get("summary") or "")
+    )
+    memory_ctx = (
+        f"Gated as a duplicate of investigation #{parent['id']} (same host+rule+source IP "
+        f"within {s.dedup_gate_window_minutes:g} min); the agent was not invoked."
+    )
+    try:
+        console_store.record_investigation(
+            alert_id=alert.id, agent_name=alert.agent.name, source_ip=source_ip,
+            rule_id=alert.rule.id, severity_score=parent.get("severity_score"),
+            severity_label=parent.get("severity_label"), attack_type=parent.get("attack_type"),
+            analysis=analysis_json, tool_trace=[], memory_context=memory_ctx,
+            retrieved_ids=None, triage_action="suppress_duplicate",
+            triage_branch=parent.get("triage_branch"), occurrence_count=None, suppressed=True,
+            case_id=parent.get("case_id"), case_number=parent.get("case_number"),
+            memory_id=None, case_error=None,
+            alert_payload=alert.model_dump(mode="json"), enrichment=None,
+            duration_ms=int((time.perf_counter() - t0) * 1000),  # gate path is near-zero, but recorded
+        )
+    except Exception:  # noqa: BLE001 - recording must never break ingestion (same as the main path)
+        metrics.increment("console_record_failures")
+        logger.exception("CONSOLE_RECORD_FAILURE (gated) alert_id=%s: duplicate not persisted",
+                         alert.id)
+    # Echo the reused verdict. AnalysisResult ignores the extra gate/human keys on validation.
+    return WebhookResponse(
+        status="deduplicated", alert_id=alert.id, rule_level=alert.rule_level,
+        enrichment={}, analysis=AnalysisResult.model_validate(parent_analysis),
+        case=None, triage=None, tool_trace=[],
+        memory={"gate_deduped": True, "parent_investigation_id": parent["id"]},
+    )
+
+
+def _maybe_gate_duplicate(alert: WazuhAlert, t0: float) -> WebhookResponse | None:
+    """If this alert duplicates a very recent investigation (same host+rule+source IP within
+    the gate window), skip the agent entirely and return a gated-duplicate response. Returns
+    None to let the normal pipeline run. Every decision is logged for Part B metrics."""
+    s = get_settings()
+    if not s.dedup_gate_enabled:
+        return None
+    source_ip = _norm_source_ip(alert)  # None for placeholder/absent IPs
+    if source_ip is None:
+        return None  # no discriminator — never gate (avoid false merges), proceed normally
+    try:
+        parent = console_store.find_recent_investigation_by_identity(
+            agent_name=alert.agent.name, rule_id=alert.rule.id, source_ip=source_ip,
+            within_minutes=s.dedup_gate_window_minutes,
+        )
+    except Exception:  # noqa: BLE001 - a gate lookup failure must never drop the alert
+        logger.exception("Dedup gate lookup failed (alert=%s); proceeding to full investigation",
+                         alert.id)
+        return None
+    if parent is None:
+        # Proceeded: the alert gets a full investigation. Logged so Part B can compute hit rate.
+        logger.info("GATE decision=proceeded alert=%s identity=%s|%s|%s",
+                    alert.id, alert.agent.name, alert.rule.id, source_ip)
+        return None
+    # Matched-and-skipped: no Gemini call at all. This log line is the metrics source of truth.
+    logger.info("GATE decision=matched_and_skipped alert=%s parent_investigation=%s "
+                "identity=%s|%s|%s window_min=%s",
+                alert.id, parent["id"], alert.agent.name, alert.rule.id, source_ip,
+                s.dedup_gate_window_minutes)
+    return _record_gated_duplicate(alert, parent, source_ip, t0)
+
+
 # Orchestrates the full per-alert pipeline: normalize, analyze, remember, triage, record, respond.
 def process_alert(payload: dict[str, Any]) -> WebhookResponse:
     """Run the full pipeline for one alert. Raises on unrecoverable errors.
@@ -118,6 +206,8 @@ def process_alert(payload: dict[str, Any]) -> WebhookResponse:
       7. respond     - bundle everything into the API response
     Steps 2, 4, 5, and 6 are wrapped so their failures degrade gracefully.
     """
+    # Start the pipeline-latency clock (recorded as duration_ms for the metrics dashboard).
+    t0 = time.perf_counter()
     # Parse/unwrap the raw JSON body into a validated WazuhAlert.
     alert = normalize_alert(payload)
     # Log the key identifying fields for traceability before any processing starts.
@@ -125,6 +215,13 @@ def process_alert(payload: dict[str, Any]) -> WebhookResponse:
         "Processing alert id=%s level=%s desc=%s",
         alert.id, alert.rule_level, alert.description,
     )
+
+    # Pre-agent dedup gate: if an identical alert was investigated moments ago, skip the
+    # agent (and its embedding) and record a lightweight duplicate reusing the prior verdict.
+    # Runs BEFORE any Gemini call. SELECT-only lookup; the write-once record is untouched.
+    gated = _maybe_gate_duplicate(alert, t0)
+    if gated is not None:
+        return gated
 
     # Memory: embed once, retrieve prior host context (reused for write-back).
     # Recompute the identity string here too, so it's available for write-back regardless of retrieval outcome.
@@ -219,6 +316,7 @@ def process_alert(payload: dict[str, Any]) -> WebhookResponse:
             case_error=case_info.get("error"),
             alert_payload=alert.model_dump(mode="json"),
             enrichment=enrichment,
+            duration_ms=int((time.perf_counter() - t0) * 1000),  # full pipeline latency for metrics
         )
     except Exception:  # noqa: BLE001 - output-recording must never break ingestion
         # Recording failure must NEVER break ingestion (memory + TheHive already

@@ -610,6 +610,30 @@ pre.block.err { border-color:var(--bad-bd); color:var(--bad-fg); }
 .tag.wt-override  { background:rgba(51,207,208,.1); color:var(--signal); border-color:rgba(51,207,208,.3); }
 .tag.wt-confirmed { background:var(--ok-bg); color:var(--ok-fg); border-color:var(--ok-bd); }
 .tag.wt-unverified { background:var(--panel-3); color:var(--ink-faint); border-color:var(--line); }
+
+/* --- metrics dashboard --- */
+/* Window selector row (24h / 7d / 30d / all) above the KPI cards. */
+.metric-windows { display:flex; align-items:center; gap:var(--sp-2); margin:var(--sp-3) 0; }
+.metric-windows .tag { text-decoration:none; }
+/* Latency p50/p95/max shown as three big-number stats in one card. */
+.metric-stats { display:flex; gap:var(--sp-6); flex-wrap:wrap; }
+.metric-stat { display:flex; flex-direction:column; gap:var(--sp-1); }
+.metric-num { font-family:var(--mono); font-size:var(--fs-2xl); font-weight:640; color:var(--ink); line-height:1; }
+.metric-num small { font-size:var(--fs-sm); color:var(--ink-dim); margin-left:2px; }
+strong.warn { color:var(--sev-high-fg); }
+/* Iteration distribution: a label, a proportional bar, and the count. */
+.dist { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:var(--sp-2); }
+.dist li { display:grid; grid-template-columns:6rem 1fr 3rem; align-items:center; gap:var(--sp-3); }
+.dist-key { font-family:var(--mono); font-size:var(--fs-sm); color:var(--ink-dim); }
+.dist-bar { background:var(--panel-3); border-radius:var(--r-pill); height:.7rem; overflow:hidden; }
+.dist-bar > span { display:block; height:100%; background:var(--signal); border-radius:var(--r-pill); min-width:2px; }
+.dist-n { text-align:right; font-family:var(--mono); font-size:var(--fs-sm); }
+/* Per-tool reliability table. */
+.metric-table { width:100%; border-collapse:collapse; font-size:var(--fs-sm); }
+.metric-table th, .metric-table td { text-align:left; padding:var(--sp-2) var(--sp-3); border-bottom:1px solid var(--line); }
+.metric-table th { color:var(--ink-dim); font-weight:560; }
+.metric-table td:nth-child(2), .metric-table td:nth-child(3), .metric-table td:nth-child(4),
+.metric-table th:nth-child(2), .metric-table th:nth-child(3), .metric-table th:nth-child(4) { text-align:right; }
 /* Nested/indented content block (e.g. sub-details within a trace entry). */
 .layered { margin:var(--sp-2) 0; padding-left:var(--sp-4); }
 /* Truncates a long text snippet with an ellipsis rather than wrapping/overflowing a cell. */
