@@ -94,8 +94,29 @@ class Settings(BaseSettings):
     embedding_dim: int = 768
     # Embedding task type passed to the embedding API, tuned for similarity search.
     embedding_task_type: str = "SEMANTIC_SIMILARITY"
-    memory_top_k: int = 5   # most-similar
+    memory_top_k: int = 5   # most-similar (FINAL count injected after feedback re-ranking)
     memory_recent_n: int = 5  # most-recent
+    # Feedback-weighted retrieval: fetch this many nearest vectors as a candidate pool, then
+    # re-rank them by similarity * feedback_weight (analyst-corrected/confirmed cases float up)
+    # before slicing to memory_top_k. Larger pool => a strong analyst signal can rescue a
+    # slightly-less-similar case; too large just adds ranking noise.
+    memory_candidate_k: int = 20
+    # Ranking multipliers applied to raw similarity by analyst-review state (baseline = 1.0).
+    # Overridden ranks highest: it's verified ground truth that corrected a past mistake.
+    memory_weight_confirmed: float = 1.2   # analyst confirmed the agent's verdict as correct
+    memory_weight_overridden: float = 1.3  # analyst corrected a wrong verdict (highest trust)
+    # Age decay: final_score also multiplies by exp(-age_in_days / memory_decay_days), so
+    # stale cases sink beneath recent ones of similar relevance. This is the e-folding time
+    # constant (NOT a strict half-life): a memory this many days old keeps ~1/e (0.37) of its
+    # score; for a true half-life H set this to H/ln(2). Decay only reorders — nothing is ever
+    # dropped, so an old high-confidence/analyst-verified match can still surface. Tune later.
+    memory_decay_days: float = 90.0
+    # Hybrid exact-match (IOC) layer: a parallel SQL lookup for prior memories sharing an
+    # exact indicator (source IP / file hash / domain) with the current alert, merged into
+    # the candidate pool. Exact hits bypass decay and rank in a tier ABOVE vector-only matches
+    # ("never miss a known IOC"), and are searched CROSS-HOST (an attacker IP seen on another
+    # machine is exactly what you want surfaced). This caps how many exact rows are pulled.
+    memory_exact_max: int = 20
 
     # A @property is a method you access like a plain attribute (settings.postgres_dsn,
     # no parentheses). This one derives the full DB connection string on the fly from

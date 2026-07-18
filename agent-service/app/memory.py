@@ -19,15 +19,26 @@ only make sense between vectors made identically, so changing any of it invalida
     the meaning", as opposed to, say, question-answering)
   - client-side L2 unit-normalization, applied symmetrically at insert AND query (see
     _l2_normalize below — scaling every vector to length 1 so distance == angle)
-  - identity string: "Rule: <desc> | SrcIP: <ip> | Groups: <groups> | Log: <full_log>"
-    (the fixed text template we embed for each alert, so all alerts are compared on the
-    same fields in the same order)
+  - identity string (v2): "Rule: <desc> | MITRE: <ids> | SrcIP: <ip> | Groups: <groups>
+    | Log: <normalized_log>" (the fixed text template we embed for each alert, so all
+    alerts are compared on the same fields in the same order). v2 (see IDENTITY_VERSION)
+    adds the input-side MITRE ATT&CK technique ids (from alert.rule.mitre, which Wazuh
+    supplies BEFORE analysis runs, so it's available at embed time and immutable) and
+    normalizes the raw log line to strip volatile tokens (syslog timestamp+host, PID,
+    ephemeral ports) so two identical attacks embed identically instead of drifting on
+    noise. NOTE: the agent's verdict/severity is deliberately NOT embedded — it doesn't
+    exist yet when embed() runs (analysis is produced later in the pipeline) and matching
+    on our own prior guess would be circular; verdicts reach the model as prompt text via
+    format_memories_for_prompt instead. v1 (pre-migration 008) had no MITRE field and
+    embedded the raw log verbatim; db/008 + the app.backfill_identity script re-embedded
+    every v1 row to v2.
 
 Changing model/dim/normalization/identity-format requires re-embedding every row.
 """
 import logging  # stdlib logging
 import math  # used for the L2 norm (sqrt of sum of squares)
-from datetime import datetime  # type hints / parsing for alert and record timestamps
+import re  # volatile-token stripping in the log-normalization step of the identity string
+from datetime import datetime, timezone  # timestamps + tz-aware "now" for the age-decay factor
 from typing import Any, Optional  # loose typing for dict payloads and nullable fields
 
 from google import genai  # Gemini SDK client, used here for embeddings
@@ -38,6 +49,10 @@ from psycopg.types.json import Json  # wraps Python dicts for JSONB columns
 from .config import get_settings  # accessor for embedding model/dim/task_type and memory retrieval sizes
 from .db import get_pool, vector_literal  # connection pool + pgvector literal formatter
 from .schemas import AnalysisResult, WazuhAlert  # typed models for the alert and its analysis
+# NOTE: extract_public_ips lives in app.tools.netutil, but the app.tools package __init__
+# imports back from app.memory (parse_alert_timestamp / memory), so importing it here at
+# module load would create an order-dependent circular import. It is imported lazily inside
+# extract_iocs() instead, by which point this module is fully initialized.
 
 logger = logging.getLogger(__name__)  # module logger
 
@@ -95,21 +110,73 @@ def embed(text: str) -> list[float]:
 # --------------------------------------------------------------------------- #
 # Identity string (locked format) + field extraction
 # --------------------------------------------------------------------------- #
+# Version of the identity-string FORMAT that embed() consumes. Stored per-row in
+# soc_memory_vectors.identity_version so we can tell which rows are on which format and
+# never silently mix them. Bump this whenever identity_string's output shape changes, and
+# migrate existing rows with app.backfill_identity. v1 = "Rule|SrcIP|Groups|Log(raw)";
+# v2 = adds "MITRE" and normalizes the log line (see module docstring).
+IDENTITY_VERSION = 2
+
+# Volatile-token strippers for normalize_log. These remove per-event noise that would
+# otherwise make two identical attacks embed to slightly different vectors.
+# BSD syslog prefix "Mon DD HH:MM:SS host " (timestamp + hostname; host is redundant with
+# the agent_name scoping and the timestamp is pure noise).
+_SYSLOG_PREFIX_RE = re.compile(r"^[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\S+\s+")
+# ISO-8601 leading timestamp for non-syslog log lines, with optional fractional secs / tz.
+_ISO_PREFIX_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:?\d{2}|Z)?\s+"
+)
+# Process id in brackets, e.g. "sshd[12345]" -> "sshd".
+_PID_RE = re.compile(r"\[\d+\]")
+# Ephemeral port numbers, e.g. "port 51000", "sport=51000" -> keep the keyword, drop the digits.
+_PORT_RE = re.compile(r"\b([a-z]*port)[\s=]+\d+", re.IGNORECASE)
+# Runs of whitespace, collapsed to a single space after the substitutions above.
+_WS_RE = re.compile(r"\s+")
+
+
+def normalize_log(full_log: str) -> str:
+    # Strip volatile tokens from a raw log line so repeat occurrences of the same attack
+    # produce the same embedded text. Only clearly per-event noise is removed (timestamps,
+    # PIDs, ephemeral ports); indicators like IPs/paths/usernames are preserved. Non-matching
+    # log shapes pass through unchanged (the prefix regexes simply don't fire).
+    if not full_log:
+        return ""  # nothing to normalize
+    s = _SYSLOG_PREFIX_RE.sub("", full_log)  # drop "Mon DD HH:MM:SS host " if present
+    s = _ISO_PREFIX_RE.sub("", s)  # else drop a leading ISO-8601 timestamp if present
+    s = _PID_RE.sub("", s)  # drop "[<pid>]"
+    s = _PORT_RE.sub(lambda m: m.group(1), s)  # drop the digits after port/sport/dport keywords
+    return _WS_RE.sub(" ", s).strip()  # collapse whitespace and trim
+
+
 def source_ip_of(alert: WazuhAlert) -> str:
     # Extract the source IP from the alert's free-form data dict, defaulting to "" if absent
     return (alert.data or {}).get("srcip") or ""
 
 
+def mitre_ids_of(alert: WazuhAlert) -> str:
+    # Extract the input-side MITRE ATT&CK technique ids Wazuh attaches to the rule (shape:
+    # {"id": ["T1110"], "tactic": [...], "technique": [...]}). This is available at embed
+    # time (unlike the agent's own analysis MITRE, which is produced later) and immutable,
+    # so it's a safe, high-signal anchor for the embedded identity. Returns "" when absent.
+    mitre = alert.rule.mitre or {}  # the raw MITRE dict Wazuh supplies, or empty
+    ids = mitre.get("id") or []  # the list of technique ids, or empty
+    if isinstance(ids, str):
+        ids = [ids]  # tolerate a bare string instead of a list
+    return ",".join(str(x) for x in ids)  # comma-join, matching the Groups formatting
+
+
 def identity_string(alert: WazuhAlert) -> str:
     # Build the single piece of text that REPRESENTS an alert for embedding. Every alert is
     # boiled down to these same fields in this same order, so two alerts are compared on a
-    # like-for-like basis. This exact format is part of the locked pipeline (see module docstring).
+    # like-for-like basis. This exact format is part of the locked pipeline (see module
+    # docstring) and is versioned by IDENTITY_VERSION.
     rule_desc = alert.rule.description or ""  # rule description, defaulting to empty string
+    mitre = mitre_ids_of(alert)  # input-side MITRE technique ids (may be "")
     groups = ",".join(alert.rule.groups or [])  # comma-join rule groups, defaulting to empty list
     # Build the exact locked identity-string format used for both embedding input and display
     return (
-        f"Rule: {rule_desc} | SrcIP: {source_ip_of(alert)} "
-        f"| Groups: {groups} | Log: {alert.full_log or ''}"
+        f"Rule: {rule_desc} | MITRE: {mitre} | SrcIP: {source_ip_of(alert)} "
+        f"| Groups: {groups} | Log: {normalize_log(alert.full_log or '')}"
     )
 
 
@@ -135,7 +202,70 @@ def parse_alert_timestamp(ts: Optional[str]) -> Optional[datetime]:
 
 
 # --------------------------------------------------------------------------- #
-# Retrieval (hybrid: top-K similar + last-N recent, scoped by agent_name)
+# IOC extraction (for the hybrid exact-match layer)
+# --------------------------------------------------------------------------- #
+# Cryptographic file hashes by length (hex). Word boundaries prevent a shorter hash from
+# matching inside a longer one (a 64-char sha256 run has no internal word boundary).
+_SHA256_RE = re.compile(r"\b[a-fA-F0-9]{64}\b")
+_SHA1_RE = re.compile(r"\b[a-fA-F0-9]{40}\b")
+_MD5_RE = re.compile(r"\b[a-fA-F0-9]{32}\b")
+# Conservative FQDN: two+ dot-separated labels ending in an alphabetic TLD. Kept tight on
+# purpose — the exact layer ranks matches VERY high, so a false-positive "domain" would wrongly
+# boost an unrelated memory. File-like tails (invoice.exe, login.php) are excluded below.
+_DOMAIN_RE = re.compile(
+    r"\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}\b"
+)
+# TLD-position tokens that are really file extensions, not domains — dropped from IOC domains.
+_FILE_EXT_TLDS = frozenset({
+    "php", "html", "htm", "exe", "txt", "sh", "js", "json", "py", "conf", "log", "xml",
+    "csv", "dll", "bin", "so", "gz", "zip", "md", "yml", "yaml", "ini", "cfg", "bak",
+    "old", "locked", "png", "jpg", "gif", "pdf", "doc", "asp", "aspx", "jsp", "war",
+})
+
+
+def _dedupe(seq: list[str]) -> list[str]:
+    # Order-preserving de-duplication for IOC lists.
+    seen: set[str] = set()
+    out: list[str] = []
+    for x in seq:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+
+def extract_iocs(alert: WazuhAlert) -> dict[str, list[str]]:
+    """Pull exact indicators of compromise (IOCs) out of an alert for the hybrid layer:
+    public IPs, file hashes (md5/sha1/sha256), and domains. These are the tokens whose
+    EXACT recurrence in a past memory is a hard signal ("we've seen this exact attacker IP /
+    this exact malicious file before"), independent of semantic similarity. Private IPs are
+    excluded (internal addresses aren't portable indicators); file-extension tails are
+    excluded from domains to avoid matching filenames/paths."""
+    from .tools.netutil import extract_public_ips  # lazy import to avoid a circular import (see top)
+    text = alert.full_log or ""  # the raw log line carries most hashes/domains
+    # Scan structured string fields too, so an IOC in alert.data (not the log) is still caught.
+    data_text = " ".join(str(v) for v in (alert.data or {}).values() if isinstance(v, str))
+    haystack = f"{text} {data_text}"
+
+    hashes: list[str] = []
+    for rx in (_SHA256_RE, _SHA1_RE, _MD5_RE):  # longest first so shorter regexes don't shadow
+        hashes.extend(m.lower() for m in rx.findall(haystack))
+
+    domains: list[str] = []
+    for cand in _DOMAIN_RE.findall(haystack):
+        if cand.rsplit(".", 1)[-1].lower() in _FILE_EXT_TLDS:
+            continue  # e.g. invoice.exe / login.php — a filename, not a domain IOC
+        domains.append(cand.lower())
+
+    return {
+        "ips": _dedupe(extract_public_ips(alert)),  # routable IPs only (portable indicators)
+        "hashes": _dedupe(hashes),
+        "domains": _dedupe(domains),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Retrieval (hybrid: exact IOC matches + top-K feedback/decay-ranked similar + last-N recent)
 # --------------------------------------------------------------------------- #
 # Shared column list reused by every SELECT against soc_memory_vectors, so the shape stays consistent
 _SELECT_COLS = (
@@ -144,34 +274,132 @@ _SELECT_COLS = (
 )
 
 
-def retrieve(agent_name: str, query_vec: list[float],
-             k: Optional[int] = None, n: Optional[int] = None) -> list[dict[str, Any]]:
-    """Return prior memories for this host: top-K most similar first, then
-    last-N most recent (by event time, falling back to store time), deduped by id.
+def feedback_weight(analysis: Optional[dict[str, Any]]) -> float:
+    """Ranking multiplier for a memory based on its analyst-review state (the learning loop).
 
-    This is the "retrieval" step of RAG. We combine two ideas: (1) the K alerts whose
-    vectors are CLOSEST to the current alert's vector (most alike in meaning — this is the
-    "nearest-neighbor" search), and (2) the N most RECENT alerts on the same host, so the
-    agent always sees fresh context even if nothing is semantically similar. `agent_name`
-    scopes everything to one host so memories don't bleed across machines."""
-    s = get_settings()  # settings for default k/n if not explicitly passed
-    k = k or s.memory_top_k  # number of nearest-neighbor results to fetch
+    A raw cosine similarity says "how alike is this past alert"; the feedback weight says
+    "how much should we TRUST what we recorded about it". Analyst-touched memories carry
+    human ground truth, so they should outrank equally-similar unverified ones:
+      - analyst-overridden (a wrong verdict was corrected on record) -> highest, this is
+        verified ground truth that fixes a past mistake
+      - analyst-confirmed (the agent's verdict was checked and endorsed) -> boosted
+      - auto-closed / never reviewed -> baseline 1.0
+    The confirm/override signal is written by record_human_verdict onto the analysis JSON."""
+    a = analysis or {}  # tolerate a missing/None analysis blob
+    if not a.get("human_reviewed"):
+        return 1.0  # auto-closed / unverified — no human signal, baseline weight
+    s = get_settings()  # tunable multipliers live in settings
+    if a.get("human_action") == "override":
+        return s.memory_weight_overridden  # analyst corrected a wrong verdict — highest trust
+    return s.memory_weight_confirmed  # analyst confirmed the verdict as correct
+
+
+def _decay_factor(row: dict[str, Any], now: datetime) -> float:
+    """Age-decay multiplier for a memory: exp(-age_in_days / memory_decay_days).
+
+    Older memories should sink beneath equally-relevant recent ones, because an attack
+    pattern from months ago is weaker evidence than the same pattern last week. Age is
+    measured from the event time (alert_timestamp), falling back to when the row was stored
+    (created_at) — the same recency basis used elsewhere. Returns 1.0 (no decay) when there's
+    no usable timestamp or the timestamp is in the future (clock skew / synthetic data), so
+    decay can only ever DOWN-weight, never invent a boost."""
+    ts = row.get("alert_timestamp") or row.get("created_at")  # event time preferred, else store time
+    if ts is None:
+        return 1.0  # nothing to age from — treat as brand new (no decay)
+    age_days = (now - ts).total_seconds() / 86400.0  # fractional days since the memory's event
+    if age_days <= 0:
+        return 1.0  # future/near-zero age — clamp to no decay rather than an >1 factor
+    return math.exp(-age_days / get_settings().memory_decay_days)  # e-folding decay
+
+
+def _score_candidate(row: dict[str, Any], now: datetime) -> float:
+    """Compute a memory row's composite ranking score and stash the components on the row.
+
+    final_score = similarity * feedback_weight * decay_factor — all three ranking signals
+    compose multiplicatively in this one place: semantic closeness, analyst trust, and
+    recency. The raw `similarity` is left untouched for display/transparency; we only ADD the
+    derived `feedback_weight`, `decay_factor`, and `final_score` fields.
+
+    Exact IOC matches (is_exact) bypass decay: a repeat of the exact same attacker IP / file
+    hash is a hard indicator that does not weaken with age, so it keeps decay_factor=1.0.
+    The caller additionally sorts exact matches into a tier above vector-only matches."""
+    fw = feedback_weight(row.get("analysis"))  # analyst-trust multiplier for this memory
+    decay = 1.0 if row.get("is_exact") else _decay_factor(row, now)  # exact IOC hits don't age out
+    row["feedback_weight"] = fw  # expose the multiplier for prompt display / auditing
+    row["decay_factor"] = decay  # expose the decay for prompt display / auditing
+    row["final_score"] = (row.get("similarity") or 0.0) * fw * decay  # composite rank key
+    return row["final_score"]
+
+
+def _exact_ioc_rows(cur, query_vec_literal: str, alert: WazuhAlert,
+                    limit: int) -> list[dict[str, Any]]:
+    """Cross-host exact-match layer: find prior memories that share an EXACT indicator
+    (source IP / file hash / domain) with this alert. Returns [] when the alert carries no
+    extractable IOCs. Deliberately NOT scoped by agent_name — a known-bad IP/hash seen on a
+    different machine is precisely what must not be missed. Each row still carries its real
+    cosine similarity (for display), but ranking treats these as a top tier (see retrieve)."""
+    iocs = extract_iocs(alert)  # {"ips":[...], "hashes":[...], "domains":[...]}
+    ips = iocs["ips"]  # matched exactly against the indexed source_ip column
+    # Word-boundary (\y) regexes so a token matches as a whole in alert_text, never as a
+    # substring of a longer one (e.g. 1.2.3.4 must not hit 1.2.3.45). Covers IPs appearing in
+    # the log body (dstip/exfil target) plus every hash and domain.
+    patterns = [rf"\y{re.escape(tok)}\y"
+                for tok in (ips + iocs["hashes"] + iocs["domains"])]
+    if not ips and not patterns:
+        return []  # no IOCs to search on — skip the query entirely
+    cur.execute(
+        f"SELECT {_SELECT_COLS}, 1 - (embedding <=> %s::vector) AS similarity "
+        "FROM soc_memory_vectors "
+        "WHERE source_ip = ANY(%s::text[]) OR alert_text ~* ANY(%s::text[]) "
+        "ORDER BY embedding <=> %s::vector LIMIT %s",
+        (query_vec_literal, ips, patterns, query_vec_literal, limit),
+    )
+    return cur.fetchall()
+
+
+def retrieve(agent_name: str, query_vec: list[float],
+             k: Optional[int] = None, n: Optional[int] = None,
+             alert: Optional[WazuhAlert] = None) -> list[dict[str, Any]]:
+    """Return prior memories for this host: exact IOC matches and the top-K most similar
+    (feedback/decay-ranked) first, then last-N most recent (by event time, falling back to
+    store time), deduped by id.
+
+    This is the "retrieval" step of RAG. We combine three ideas: (1) the alerts whose vectors
+    are CLOSEST to the current alert's vector (most alike in meaning — the "nearest-neighbor"
+    search), RE-RANKED so analyst-verified and recent cases outrank equally-similar unverified
+    or stale ones; (2) EXACT-INDICATOR matches — prior memories sharing an exact IP/hash/domain
+    with this alert (a hard signal that must never be missed, so it ranks in a tier above the
+    vector matches and ignores age decay); and (3) the N most RECENT alerts on the same host,
+    so the agent always sees fresh context even if nothing else matches. Vector search and the
+    recency list are host-scoped (`agent_name`) so memories don't bleed across machines; the
+    exact-IOC layer is intentionally cross-host (pass `alert` to enable it).
+
+    Feedback/decay re-ranking: instead of taking the k nearest vectors directly, we pull a
+    wider candidate pool (memory_candidate_k), merge in the exact-IOC hits, and sort by
+    (is_exact, similarity * feedback_weight * decay_factor), keeping the top k. This lets a
+    strong analyst signal float a verified case above a marginally-closer unverified one, lets
+    recency break ties, and guarantees exact IOC hits sit on top regardless of either."""
+    s = get_settings()  # settings for default k/n and the candidate-pool / weight knobs
+    k = k or s.memory_top_k  # FINAL number of similarity results to inject (after re-ranking)
     n = n or s.memory_recent_n  # number of most-recent results to fetch
+    cand_k = max(s.memory_candidate_k, k)  # nearest-neighbor pool to re-rank; never smaller than k
     qv = vector_literal(query_vec)  # format the query vector for use in the SQL string
 
     with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         # `<=>` is pgvector's cosine-distance operator: 0 means identical direction (very
         # similar), larger means less similar. We convert to a friendlier "similarity" score
-        # with `1 - distance`, so 1.0 == a perfect match and lower == less alike. ORDER BY the
-        # distance ascending + LIMIT k gives the k nearest neighbors (the most similar alerts).
-        # Top-K by cosine distance (<=>) among rows scoped to this host, with similarity = 1 - distance
+        # with `1 - distance`, so 1.0 == a perfect match and lower == less alike. We fetch the
+        # cand_k nearest by distance (ORDER BY <=> ASC) as a candidate POOL, then re-rank in
+        # Python by the composite score below.
         cur.execute(
             f"SELECT {_SELECT_COLS}, 1 - (embedding <=> %s::vector) AS similarity "
             "FROM soc_memory_vectors WHERE agent_name = %s "
             "ORDER BY embedding <=> %s::vector LIMIT %s",
-            (qv, agent_name, qv, k),
+            (qv, agent_name, qv, cand_k),
         )
-        similar = cur.fetchall()  # the K nearest-neighbor rows
+        candidates = cur.fetchall()  # the cand_k nearest-neighbor rows (candidate pool)
+        # Exact-IOC layer (cross-host). Only runs when an alert is supplied and it has IOCs.
+        exact = _exact_ioc_rows(cur, qv, alert, s.memory_exact_max) if alert is not None else []
         # Last-N most recent rows for the same host, ordered by event time (falling back to store time)
         cur.execute(
             f"SELECT {_SELECT_COLS}, NULL::float8 AS similarity "
@@ -181,11 +409,36 @@ def retrieve(agent_name: str, query_vec: list[float],
         )
         recent = cur.fetchall()  # the N most recent rows
 
+    # Merge the vector pool with the exact-IOC hits, deduped by id. A row found by BOTH layers
+    # keeps a single entry flagged is_exact (the exact layer wins — it's the stronger signal).
+    pool: dict[int, dict[str, Any]] = {}
+    for r in candidates:
+        r["is_exact"] = False  # vector-only match unless the exact layer also returns it
+        pool[r["id"]] = r
+    for r in exact:
+        existing = pool.get(r["id"])
+        if existing is not None:
+            existing["is_exact"] = True  # upgrade the already-pooled vector hit to an exact hit
+        else:
+            r["is_exact"] = True  # exact-only hit (a row the vector search missed / other host)
+            pool[r["id"]] = r
+
+    # Re-rank the merged pool by the composite score (similarity * feedback_weight *
+    # decay_factor), then keep the top k. `now` is captured once so every candidate is aged
+    # against the same instant. The sort key puts exact IOC hits in a tier ABOVE vector-only
+    # matches (is_exact first), then orders within each tier by the composite score.
+    now = datetime.now(timezone.utc)  # single reference instant for all age-decay calcs
+    merged = list(pool.values())
+    for r in merged:
+        _score_candidate(r, now)  # annotates feedback_weight + decay_factor + final_score
+    merged.sort(key=lambda r: (r["is_exact"], r["final_score"]), reverse=True)  # exact tier first
+    similar = merged[:k]  # the top-k after hybrid re-ranking (what actually gets injected)
+
     # Merge the two result sets. The same alert can show up in BOTH the "similar" and the
     # "recent" lists, so we track ids we've already added and skip repeats (dedupe).
     out: list[dict[str, Any]] = []  # combined, deduped result list
     seen: set[int] = set()  # ids already included, to avoid duplicates between the two queries
-    for r in similar:  # already ordered by ascending distance == descending similarity
+    for r in similar:  # already ordered by descending feedback-weighted final_score
         r["is_similar"] = True  # tag each similar-match row for downstream formatting
         seen.add(r["id"])
         out.append(r)
@@ -207,7 +460,22 @@ def format_memories_for_prompt(memories: list[dict[str, Any]]) -> str:
     for m in memories:
         a = m.get("analysis") or {}  # the stored analysis JSON for this memory row
         if m.get("is_similar") and m.get("similarity") is not None:
-            tag = f"similar={m['similarity']:.3f}"  # show the similarity score to 3 decimals
+            tag = f"similar={m['similarity']:.3f}"  # show the raw similarity score to 3 decimals
+            # Surface the ranking adjustments so the ordering is transparent/auditable in the
+            # prompt: any weight/decay that moved the row shows as raw ·w<..>·d<..>→<final>.
+            fw = m.get("feedback_weight")  # analyst-trust multiplier applied during re-ranking
+            decay = m.get("decay_factor")  # recency multiplier applied during re-ranking
+            parts = []
+            if fw and fw != 1.0:
+                parts.append(f"w{fw:g}")  # e.g. w1.3 for an analyst-overridden case
+            if decay is not None and decay < 0.999:
+                parts.append(f"d{decay:.2f}")  # e.g. d0.75 for a ~26-day-old memory
+            if parts:
+                tag += " " + "·".join(parts) + f"→{m.get('final_score', 0.0):.3f}"
+            if m.get("is_exact"):
+                # Hard-indicator match: prefix prominently and note the (possibly cross-host)
+                # origin, so the model treats "we've seen this exact IOC before" as strong.
+                tag = f"EXACT-IOC@{m.get('agent_name')} {tag}"
         else:
             tag = "recent"  # recency-based match, no similarity score to show
         when = m.get("alert_timestamp") or m.get("created_at")  # prefer event time, fall back to store time
@@ -302,8 +570,9 @@ def write_back(alert: WazuhAlert, identity: str, analysis: AnalysisResult,
         # Insert a new memory row: alert identity fields, the analysis JSON, and the precomputed embedding
         cur.execute(
             "INSERT INTO soc_memory_vectors "
-            "(agent_name, source_ip, rule_id, alert_text, analysis, embedding, alert_timestamp) "
-            "VALUES (%s, %s, %s, %s, %s, %s::vector, %s) RETURNING id",
+            "(agent_name, source_ip, rule_id, alert_text, analysis, embedding, alert_timestamp, "
+            "identity_version) "
+            "VALUES (%s, %s, %s, %s, %s, %s::vector, %s, %s) RETURNING id",
             (
                 alert.agent.name or "unknown",
                 source_ip_of(alert) or None,  # store NULL rather than "" when there's no source IP
@@ -312,6 +581,7 @@ def write_back(alert: WazuhAlert, identity: str, analysis: AnalysisResult,
                 Json(analysis.model_dump()),  # serialize the analysis model into JSONB
                 vector_literal(embedding),  # format the already-normalized embedding for pgvector
                 parse_alert_timestamp(alert.timestamp),  # parsed event time, or NULL if unparseable
+                IDENTITY_VERSION,  # tag the row with the identity-format version it was built with
             ),
         )
         new_id = cur.fetchone()[0]  # the id of the newly inserted row

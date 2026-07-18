@@ -21,7 +21,7 @@ import logging
 from typing import Any
 
 # memory: semantic memory embed/retrieve/write-back; metrics: in-process counters; triage: routing logic.
-from . import memory, metrics, triage
+from . import explain, memory, metrics, triage
 # The LLM-driven investigation/analysis loop.
 from .agent import run_agent
 # Settings accessor, used here to check whether memory is enabled.
@@ -66,8 +66,9 @@ def _retrieve_memory(alert: WazuhAlert):
         logger.exception("Embedding failed; proceeding without memory")
         return None, [], default_ctx
     try:
-        # Look up prior memories for this host using the freshly computed embedding.
-        memories = memory.retrieve(alert.agent.name or "unknown", embedding)
+        # Look up prior memories for this host using the freshly computed embedding. Pass the
+        # alert so the hybrid exact-match (IOC) layer can find cross-host indicator matches.
+        memories = memory.retrieve(alert.agent.name or "unknown", embedding, alert=alert)
     except Exception:  # noqa: BLE001
         # Retrieval failures still allow the embedding to be reused for write-back later.
         logger.exception("Memory retrieval failed; proceeding without prior context")
@@ -181,6 +182,15 @@ def process_alert(payload: dict[str, Any]) -> WebhookResponse:
         case_info = case or {}
         # Serialize the analysis to plain JSON-compatible types for storage.
         analysis_json = analysis.model_dump(mode="json")
+        # Attach a compact "why this verdict" explanation, built in code from the scored
+        # memory rows + MITRE + tool results already in hand (no extra LLM call). Stored at
+        # INSERT time because alert_investigations is write-once (it can never be UPDATEd in).
+        # Best-effort: a failure here must not block recording the investigation.
+        try:
+            analysis_json["explanation"] = explain.build_explanation(
+                alert, analysis, memories, enrichment)
+        except Exception:  # noqa: BLE001 - explanation is presentational; never fail ingestion on it
+            logger.exception("Explanation build failed (investigation still recorded)")
         # Persist a full snapshot of this alert's processing for the analyst console.
         console_store.record_investigation(
             alert_id=alert.id,

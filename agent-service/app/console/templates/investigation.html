@@ -149,6 +149,39 @@
   {% endif %}
 </section>
 
+<!-- Section: compact "why this verdict" summary, derived from the RAG memory scores, MITRE
+     match and tool signals. Additive — the full step-by-step trace stays below unchanged. -->
+{% if explanation %}
+<h2>Why this verdict <span class="muted note">(auto-summary — full detail below)</span></h2>
+<section class="card why-verdict">
+  <!-- The single phrase for what the verdict's confidence rests on -->
+  <p><strong>Confidence basis.</strong> {{ explanation.confidence_basis }}</p>
+  <!-- Strongest external-reputation signal, only when enrichment produced one -->
+  {% if explanation.key_tool_signal %}
+  <p><strong>Key signal.</strong> {{ explanation.key_tool_signal }}</p>
+  {% endif %}
+  <!-- MITRE technique behind the verdict, with where it came from -->
+  {% if explanation.mitre_match %}
+  <p><strong>MITRE.</strong> <span class="tag">{{ explanation.mitre_match.technique_id }}</span>
+     <span class="muted">from {{ explanation.mitre_match.source }}</span></p>
+  {% endif %}
+  <!-- Top 2-3 past cases that most influenced the verdict, each linked to its memory page -->
+  {% if explanation.top_memories %}
+  <p><strong>Top precedents.</strong></p>
+  <ul class="why-mem">
+    {% for m in explanation.top_memories %}
+    <li>
+      <a href="/console/memory/{{ m.memory_id }}">#{{ m.memory_id }}</a>
+      <span class="tag wt-{{ m.weight_type }}">{{ m.weight_type | replace('_', ' ') }}</span>
+      {% if m.similarity is defined %}<span class="muted">sim {{ '%.2f'|format(m.similarity) }}{% if m.final_score is defined %} · score {{ '%.2f'|format(m.final_score) }}{% endif %}</span>{% endif %}
+      <div class="reason">{{ m.why }}</div>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>
+{% endif %}
+
 <!-- Section: how triage routed this alert -->
 <h2>How it was sorted</h2>
 <section class="card">
