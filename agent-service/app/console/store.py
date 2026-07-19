@@ -697,21 +697,59 @@ def link_case(*, investigation_id: int, case_id: str, case_number, actor_usernam
     return link_id
 
 
-def delete_investigation(inv_id: int) -> bool:
-    """Remove an investigation and the human input layered on it (verdict reviews,
-    triage feedback), in one transaction. The write-once trigger only blocks UPDATE,
-    so DELETE is allowed; the two child tables have no ON DELETE CASCADE, so they are
-    cleared first. The alert's semantic-memory row is deliberately left alone — it is
-    shared SOC knowledge, and is removable on its own from the memory browser.
-    The audit row is written by the caller BEFORE this runs (no unaudited deletes)."""
-    with get_pool().connection() as conn, conn.cursor() as cur:
-        # Delete child rows first (no cascading FK), then the parent row —
-        # all in one transaction so a failure partway rolls everything back
-        cur.execute("DELETE FROM verdict_reviews WHERE investigation_id = %s", (inv_id,))
-        cur.execute("DELETE FROM triage_feedback WHERE investigation_id = %s", (inv_id,))
-        cur.execute("DELETE FROM investigation_case_links WHERE investigation_id = %s", (inv_id,))
-        cur.execute("DELETE FROM alert_investigations WHERE id = %s", (inv_id,))
-        return cur.rowcount > 0  # True only if the parent row actually existed and was removed
+# Every table holding a foreign key to alert_investigations. NONE of them declare
+# ON DELETE CASCADE, so Postgres refuses to delete a parent row while any child row
+# survives — each must be cleared by hand, here, before the parent goes.
+#
+# Keep this list in step with the schema. It is the single source of truth for both
+# the single and bulk delete paths below, because it previously was not: the deletes
+# were written out twice and investigation_chat was missed in both when that table
+# was added. The result was that any investigation an analyst had chatted about
+# became undeletable, failing on a foreign-key violation.
+_INVESTIGATION_CHILD_TABLES = (
+    "verdict_reviews",        # analyst confirm/override verdicts
+    "triage_feedback",        # analyst feedback on the triage decision
+    "investigation_case_links",  # links to TheHive cases
+    "investigation_chat",     # per-case assistant conversation ("Ask assistant about this case")
+)
+
+
+def delete_investigation(inv_id: int, *, actor_username: str,
+                         detail: Optional[str] = None) -> bool:
+    """Remove an investigation, the human input layered on it, and its assistant chat —
+    writing the audit row in the SAME transaction. The write-once trigger only blocks
+    UPDATE, so DELETE is allowed. The alert's semantic-memory row is deliberately left
+    alone — it is shared SOC knowledge, and is removable on its own from the memory browser.
+
+    The audit is written here rather than by the caller so that auditing and deleting
+    commit together. When the caller audited first in a separate transaction, a delete
+    that then failed left an audit row asserting a deletion that never happened — the
+    audit log claimed history that the database contradicted. Auditing on this cursor,
+    before the deletes, keeps the original 'never delete unaudited' guarantee and adds
+    the converse: never record a deletion that did not occur."""
+    with get_pool().connection() as conn:
+        with conn.cursor(row_factory=dict_row) as read_cur:
+            # FOR UPDATE locks the row so it cannot change between audit and delete.
+            read_cur.execute(
+                "SELECT id, alert_id, agent_name, source_ip, rule_id, severity_label, "
+                "       triage_action, case_number "
+                "FROM alert_investigations WHERE id = %s FOR UPDATE", (inv_id,))
+            row = read_cur.fetchone()
+        if row is None:
+            return False  # already gone — nothing to delete and nothing to audit
+        with conn.cursor() as cur:
+            _audit_on(cur, actor_username, "investigation_delete", target_type="investigation",
+                      target_id=str(inv_id),
+                      before={k: v for k, v in row.items() if k != "id"},
+                      detail=detail or "deleted from triage queue")
+            # Children first (no cascading FK), then the parent — one transaction, so a
+            # failure partway rolls back the audit row along with every delete.
+            for table in _INVESTIGATION_CHILD_TABLES:
+                cur.execute(f"DELETE FROM {table} WHERE investigation_id = %s", (inv_id,))
+            cur.execute("DELETE FROM alert_investigations WHERE id = %s", (inv_id,))
+    logger.info("AUDIT actor=%s action=investigation_delete target=investigation/%s",
+                actor_username, inv_id)
+    return True
 
 
 def delete_investigations(inv_ids: list[int], *, actor_username: str) -> list[int]:
@@ -753,10 +791,11 @@ def delete_investigations(inv_ids: list[int], *, actor_username: str) -> list[in
                           before={k: v for k, v in r.items() if k != "id"},
                           detail=f"bulk delete of {len(found)} investigation(s) from the triage queue")
                 deleted.append(r["id"])
-            # Bulk-delete all child rows, then the parent rows, using ANY() over the found ids
-            cur.execute("DELETE FROM verdict_reviews WHERE investigation_id = ANY(%s)", (found,))
-            cur.execute("DELETE FROM triage_feedback WHERE investigation_id = ANY(%s)", (found,))
-            cur.execute("DELETE FROM investigation_case_links WHERE investigation_id = ANY(%s)", (found,))
+            # Bulk-delete all child rows, then the parent rows, using ANY() over the found ids.
+            # Driven by the shared table list so this path can never again fall out of step
+            # with the single-delete path or with the schema.
+            for table in _INVESTIGATION_CHILD_TABLES:
+                cur.execute(f"DELETE FROM {table} WHERE investigation_id = ANY(%s)", (found,))
             cur.execute("DELETE FROM alert_investigations WHERE id = ANY(%s)", (found,))
     logger.info("AUDIT actor=%s action=investigation_delete bulk=%s ids=%s",
                 actor_username, len(deleted), deleted)  # summary log line for the whole bulk operation

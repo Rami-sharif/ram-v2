@@ -319,27 +319,22 @@ def delete_investigation(
     request: Request, inv_id: int, analyst: dict = Depends(require_analyst),
     back: str = Form(""),  # the queue URL (with filters/page) to redirect back to
 ):
-    """Drop an alert from the triage queue. Audited FIRST (an audit failure raises
-    and nothing is deleted), then the record and its layered human input go.
+    """Drop an alert from the triage queue. The audit row and the deletes are written in
+    ONE transaction inside store.delete_investigation, so they stand or fall together.
 
-    "Audit first" ordering matters: if writing the audit log fails it raises an
-    exception, so the delete below never runs. That guarantees we never quietly
-    change data without a record of who did it."""
-    rec = store.get_investigation(inv_id)  # load the record so we can audit its details before deleting
+    This used to audit here, in a separate transaction, and delete afterwards. The intent
+    was 'never delete without a record', but it produced the opposite failure: when the
+    delete raised, the already-committed audit row asserted a deletion that had not
+    happened. Doing both on one transaction keeps the original guarantee and adds its
+    converse — no unaudited delete, and no audit for a delete that did not occur."""
+    rec = store.get_investigation(inv_id)  # load the record so we can describe what is going
     if rec is None:
         return RedirectResponse("/console/queue?err=investigation+not+found", status_code=303)
-    inv = rec["inv"]  # convenience alias
-    store.write_audit(
-        analyst["username"], "investigation_delete", target_type="investigation",
-        target_id=str(inv_id),
-        before={"alert_id": inv.get("alert_id"), "agent_name": inv.get("agent_name"),
-                "source_ip": inv.get("source_ip"), "rule_id": inv.get("rule_id"),
-                "severity_label": inv.get("severity_label"),
-                "triage_action": inv.get("triage_action"), "case_number": inv.get("case_number")},
+    store.delete_investigation(
+        inv_id, actor_username=analyst["username"],
         detail=f"deleted from triage queue ({len(rec['reviews'])} review(s), "
                f"{len(rec['feedback'])} feedback row(s) removed with it)",
-    )  # audit row written first; if this raises, delete_investigation below never runs
-    store.delete_investigation(inv_id)  # actually remove the investigation and its dependent rows
+    )
     return _queue_back(back, msg="investigation+deleted")
 
 
