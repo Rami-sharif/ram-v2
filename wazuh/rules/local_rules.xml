@@ -1,0 +1,69 @@
+<!-- RAM v2 local rules.
+     Mounted read-only over /var/ossec/etc/rules/local_rules.xml so this file, not a
+     hand-edit inside the container, is the source of truth.
+
+     WHY THESE EXIST
+     Measured on this deployment: the stock ruleset consistently scores a web attack that
+     SUCCEEDED lower than the same attack when it FAILED, because "success" looks like an
+     ordinary 200 response.
+
+         path traversal blocked (404)  -> rule 31104, level 6   -> agent sees it
+         path traversal worked  (200)  -> rule 31108, level 0   -> NO ALERT AT ALL
+         web shell command run  (200)  -> rule 31100, level 0   -> NO ALERT AT ALL
+
+     Level 0 in Wazuh means no alert is generated, so lowering the integration threshold
+     cannot surface these no matter how low it goes. They need rules of their own.
+
+     WHY NOT SIMPLY RAISE 31100/31108
+     Because 31100 is the parent of EVERY web access-log line, and 31108 is "a normal
+     successful request, ignore it". Raising either to level 10 would make every ordinary
+     page load a level-10 alert and flood the agent with the entire web firehose.
+
+     So each rule below requires BOTH a genuinely dangerous URL pattern AND a success
+     status code. A normal successful request matches neither and stays at level 0. -->
+<group name="local,ram-v2,web,attack,">
+
+  <!-- Successful path traversal / sensitive file disclosure.
+       Level 10 (not 12): reading a file is serious and must reach the agent, but it is a
+       disclosure rather than the code execution below. The agent decides final severity;
+       this level only controls whether it gets to look at all. -->
+  <rule id="100200" level="10">
+    <!-- Children of the access-log parent and of the "ignored simple request" rule, which
+         is where a SUCCESSFUL traversal actually lands (verified with wazuh-logtest). -->
+    <if_sid>31100, 31108</if_sid>
+    <!-- Success only. A blocked attempt is already covered by 31104 at level 6, and we do
+         not want to double-alert on attempts. -->
+    <id>^200</id>
+    <!-- Traversal encodings plus the sensitive targets worth reading. Kept deliberately
+         specific: broad patterns here would re-create the flood this rule set avoids. -->
+    <url>../..|..%2f|..%5c|%2e%2e|/etc/passwd|/etc/shadow|/proc/self/environ</url>
+    <url>/boot.ini|/windows/win.ini|/.env|/.git/config|/wp-config.php</url>
+    <description>Path traversal or sensitive file read that SUCCEEDED (HTTP 200).</description>
+    <mitre>
+      <id>T1083</id>
+      <id>T1190</id>
+    </mitre>
+    <group>web_attack,attack,pci_dss_6.5,pci_dss_11.4,gdpr_IV_35.7.d,nist_800_53_SI.4,</group>
+  </rule>
+
+  <!-- Successful web shell / remote command execution.
+       Level 12 rather than 10: this is code running on the host, the most severe outcome
+       in this family, and the extra level keeps it distinguishable in Wazuh's own views. -->
+  <rule id="100201" level="12">
+    <if_sid>31100, 31108</if_sid>
+    <id>^200</id>
+    <!-- Two things only: known web shell filenames, and command-execution parameters.
+         Left OUT on purpose: a bare "whoami" or "cmd", which appear in ordinary
+         application URLs often enough to cause false positives. -->
+    <url>c99.php|r57.php|b374k|wso.php|/shell.php|/cmd.php|/backdoor</url>
+    <url>cmd=|exec=|passthru=|shell_exec=|system=|eval=</url>
+    <description>Web shell or remote command execution that SUCCEEDED (HTTP 200).</description>
+    <mitre>
+      <id>T1505.003</id>
+      <id>T1059</id>
+      <id>T1190</id>
+    </mitre>
+    <group>web_attack,attack,pci_dss_6.5,pci_dss_11.4,gdpr_IV_35.7.d,nist_800_53_SI.4,</group>
+  </rule>
+
+</group>

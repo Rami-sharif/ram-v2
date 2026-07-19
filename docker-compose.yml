@@ -381,6 +381,10 @@ services:
       - ./wazuh/integrations/custom-ramv2:/var/ossec/integrations/custom-ramv2
       # The custom integration's executable entry point script itself.
       - ./wazuh/integrations/custom-ramv2.py:/var/ossec/integrations/custom-ramv2.py
+      # RAM v2 custom detection rules. Mounted so the repo is the source of truth rather
+      # than a hand-edit inside the container: /var/ossec/etc is a named volume, so an
+      # in-container edit would survive restarts while being invisible to version control.
+      - ./wazuh/rules/local_rules.xml:/var/ossec/etc/rules/local_rules.xml
     networks:
       - ramnet
     depends_on:
@@ -480,6 +484,11 @@ services:
     volumes:
       # Read-only Wazuh indexer CA so the agent can verify TLS to wazuh.indexer.
       - ./wazuh/config/wazuh_indexer_ssl_certs/root-ca.pem:/certs/root-ca.pem:ro
+      # Labelled alert samples + their expected severity bands, used by the evaluation
+      # harness (python -m app.eval). Mounted read-only and NOT baked into the image:
+      # they are test fixtures, not application code, and mounting keeps edits to the
+      # ground-truth labels effective without a rebuild.
+      - ./samples:/app/samples:ro
     ports:
       # Expose the FastAPI app (agent API + analyst console) on the host,
       # matching the Dockerfile's EXPOSE 8000 and uvicorn's bind port.
