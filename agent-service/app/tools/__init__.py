@@ -41,6 +41,8 @@ from . import virustotal  # noqa: E402,F401
 from . import wazuh_indexer  # noqa: E402,F401  (registers query_wazuh_logs -> INTERACTIVE_REGISTRY)
 # Importing memory_tool registers the semantic "search_memory" tool.
 from . import memory_tool  # noqa: E402,F401
+# Importing case_history registers "search_past_investigations" — the agent's own case history.
+from . import case_history  # noqa: E402,F401
 # Importing console_lookup registers the read-only case-lookup tools for the console chat.
 from . import console_lookup  # noqa: E402,F401  (registers case-lookup read tools -> INTERACTIVE_REGISTRY)
 # Importing console_actions registers the audited, write-capable console-chat tools.

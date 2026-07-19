@@ -322,6 +322,14 @@ register(Tool(
 # The allowlist of queryable fields, mapping each field name to its "kind"
 # (string or numeric). Only these fields may be filtered or grouped on; the kind
 # controls which operators are legal (e.g. "contains" only makes sense on strings).
+# NOTE: every field here was verified as `keyword` (or numeric) in the live index mapping.
+# That check is not optional: a `text`-mapped field silently returns ZERO hits for a term
+# query rather than erroring, which is worse than a failure — the model would conclude
+# "no such activity" instead of "I could not ask". Re-verify with
+#   GET wazuh-alerts-*/_mapping/field/<field>
+# before adding anything to this list. data.dstport/srcport are keyword (NOT numeric) in
+# Wazuh, so they are declared "string" — that also makes _field_clause correctly reject
+# `range` on them.
 _QUERY_FIELDS: dict[str, str] = {
     "rule.id": "string",
     "rule.level": "numeric",
@@ -329,6 +337,13 @@ _QUERY_FIELDS: dict[str, str] = {
     "data.srcip": "string",
     "data.dstuser": "string",
     "data.srcuser": "string",
+    # --- added for the automated agent's statistics tool ---
+    "rule.groups": "string",     # attack category (keyword array; term matches any element)
+    "rule.mitre.id": "string",   # MITRE technique, e.g. T1110 — "other T1110 activity here?"
+    "data.dstip": "string",      # destination/exfil target — previously invisible
+    "data.dstport": "string",    # keyword in Wazuh, not numeric (see note above)
+    "data.url": "string",        # web/proxy alerts; pairs with the lookup_url tool
+    "syscheck.path": "string",   # file-integrity monitoring path
 }
 # The only comparison operators this tool supports (another allowlist).
 _OPERATORS = ("equals", "contains", "range")
@@ -591,8 +606,8 @@ register_interactive(Tool(
         "Flexible read-only query over Wazuh alerts (indexer). Use instead of the narrow "
         "tools when you need a custom filter or counts. mode='search' returns matching "
         "alerts; mode='aggregate' returns COUNTS grouped by a field and/or time bucket "
-        "(not raw alerts). Only these fields are queryable: rule.id, rule.level, agent.name, "
-        "data.srcip, data.dstuser, data.srcuser."
+        # Derived from the allowlist so this text can never drift out of sync with it.
+        f"(not raw alerts). Only these fields are queryable: {', '.join(sorted(_QUERY_FIELDS))}."
     ),
     parameters={
         # Which allowlisted field to filter/group on (optional for pure time-bucketed aggregates).
@@ -616,4 +631,86 @@ register_interactive(Tool(
         "time_bucket": {"type": "string", "description": "aggregate mode: bucket size e.g. '1h', '1d'"},
     },
     handler=_query_wazuh_logs,
+))
+
+
+# --------------------------------------------------------------------------- #
+# get_alert_statistics — the automated agent's BASELINING tool.
+#
+# The flexible query tool above stays console-only: seven interlocking parameters is a lot
+# of surface for an unattended model to get right, and a malformed call would waste one of
+# its few investigation turns. This is a deliberately narrow alternative — three simple
+# arguments — that answers the one question the narrow log tools cannot: "is what I am
+# looking at RARE or ROUTINE here?". Counting is exactly how an analyst separates a genuine
+# anomaly from everyday noise, so it is the highest-value aggregate to expose.
+# --------------------------------------------------------------------------- #
+# The subset of allowlisted fields worth grouping counts by. Kept short on purpose: every
+# enum value costs prompt tokens, and a long list makes the choice harder, not better.
+_STATS_GROUP_BY = ("rule.id", "rule.groups", "rule.mitre.id", "data.srcip", "data.dstip",
+                   "agent.name", "data.srcuser")
+
+
+def _alert_statistics(args: dict, ctx: ToolContext) -> dict:
+    """Count alerts grouped by one field over the last N days, optionally scoped to a host."""
+    s = get_settings()
+    group_by = (args.get("group_by") or "rule.id").strip()
+    if group_by not in _STATS_GROUP_BY:
+        # Constrain to the curated subset rather than the whole allowlist.
+        return {"error": f"group_by {group_by!r} not allowed (allowed: {list(_STATS_GROUP_BY)})"}
+    # Default the window to a week — long enough to establish a baseline, short enough that
+    # the query does not scan every daily index in the cluster.
+    try:
+        days = min(max(int(args.get("days") or 7), 1), 30)
+    except (TypeError, ValueError):
+        days = 7
+    # Default the host scope to THIS alert's own host, so a zero/one-argument call already
+    # answers "is this normal for this machine?".
+    host = args.get("host")
+    if host is None:
+        host = (ctx.alert.agent.name or "") if ctx.alert else ""
+    host = (host or "").strip()
+
+    clauses: list[dict] = []
+    try:
+        if host:
+            # Scope to one host unless the caller explicitly passed host="" for a global view.
+            clauses.append(_field_clause("agent.name", "equals", host))
+        # Reuse the shared relative-window parser so time handling stays identical everywhere.
+        time_clause = _parse_time_range(f"{days}d")
+        if time_clause:
+            clauses.append(time_clause)
+    except _QueryError as exc:
+        return {"error": str(exc)}
+
+    # Flat terms aggregation (no time bucketing) — counts per distinct value, capped by
+    # tool_max_agg_buckets inside _aggregate.
+    result = _aggregate(clauses, group_by, None)
+    if "error" in result:
+        return result
+    # Echo the scope back so the model cannot misread which window/host the counts describe.
+    return {"host": host or "(all hosts)", "days": days, **result}
+
+
+# register (NOT register_interactive): this one IS for the automated investigation agent.
+register(Tool(
+    name="get_alert_statistics",
+    description=(
+        "COUNT how many Wazuh alerts match, grouped by one field, over the last N days — use "
+        "this to judge whether what you are seeing is RARE or ROUTINE on this host, which the "
+        "raw-log tools cannot tell you. Examples: how often this rule has fired here, the top "
+        "source IPs hitting this host, whether this MITRE technique has appeared before. "
+        "Defaults to this alert's own host and the last 7 days, so it is useful with no "
+        "arguments. Returns COUNTS, not raw alerts — use get_related_logs for the alerts "
+        "themselves."
+    ),
+    parameters={
+        "group_by": {"type": "string", "enum": list(_STATS_GROUP_BY),
+                     "description": "field to count by (default rule.id)"},
+        "days": {"type": "integer", "description": "look-back window in days (default 7, max 30)"},
+        "host": {"type": "string",
+                 "description": "host to scope to; defaults to this alert's host, pass \"\" for all hosts"},
+    },
+    # No required args: a bare call already answers "is this rule routine on this host?".
+    required=[],
+    handler=_alert_statistics,
 ))

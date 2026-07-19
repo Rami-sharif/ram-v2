@@ -12,10 +12,14 @@ send HTTP requests to (like a browser fetching a page), and it answers with JSON
 (a text format of nested key/value data). These three tools are READ-ONLY — they
 only fetch reputation info, they never change anything — so they are safe for the
 automated agent to call."""
+# base64: VT identifies a URL resource by its URL-safe base64 id (see _url_lookup).
+import base64
 # Standard library logging for reporting VT request failures without crashing tool dispatch.
 import logging
-# Standard library regex, used to validate hash and domain shapes before calling out to VT.
+# Standard library regex, used to validate hash/domain/URL shapes before calling out to VT.
 import re
+# Used to turn VT's unix-epoch date fields into readable ISO dates for the model.
+from datetime import datetime, timezone
 # Any is used for the loosely-typed "raw response body" return values.
 from typing import Any
 
@@ -38,6 +42,8 @@ VT_BASE = "https://www.virustotal.com/api/v3"
 _HASH_RE = re.compile(r"^[A-Fa-f0-9]{32}$|^[A-Fa-f0-9]{40}$|^[A-Fa-f0-9]{64}$")
 # Matches a plausible domain name (labels separated by dots, ending in an alphabetic TLD).
 _DOMAIN_RE = re.compile(r"^(?=.{1,253}$)([A-Za-z0-9_-]{1,63}\.)+[A-Za-z]{2,}$")
+# Matches a full http(s) URL — the only shape VT's URL endpoint accepts.
+_URL_RE = re.compile(r"^https?://\S+$", re.IGNORECASE)
 
 
 def _vt_get(path: str) -> tuple[int, dict]:
@@ -82,6 +88,17 @@ def _stats(attrs: dict) -> dict:
     }
 
 
+def _epoch_date(value: Any) -> Any:
+    """VT reports dates as unix epoch seconds, which the model reads poorly. Convert to a
+    plain ISO date (YYYY-MM-DD); return None when absent or unparseable. Dates matter here
+    as a novelty signal: a file first seen hours ago, or a domain registered days ago, is
+    far more suspicious than one with years of history."""
+    try:
+        return datetime.fromtimestamp(int(value), tz=timezone.utc).date().isoformat()
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None  # missing or malformed — just omit the signal rather than erroring
+
+
 # --- IP ---------------------------------------------------------------------
 def _ip_lookup(args: dict, ctx: ToolContext) -> dict:
     # Pull the IP argument, defaulting to "" and trimming whitespace.
@@ -99,9 +116,12 @@ def _ip_lookup(args: dict, ctx: ToolContext) -> dict:
         return {"ip": ip, "error": f"vt_status_{code}", **body}
     # Drill into the nested VT response shape to get the resource's attributes.
     a = body.get("data", {}).get("attributes", {})
-    # Merge detection stats with IP-specific metadata (country, AS owner, tags).
+    # Merge detection stats with IP-specific metadata (country, AS owner, tags). asn/network
+    # identify WHO routes this address — useful for spotting bulletproof/hosting ranges.
+    # (whois is deliberately NOT included: multi-KB free text that would eat the result cap.)
     return {"ip": ip, "found": True, **_stats(a),
-            "country": a.get("country"), "as_owner": a.get("as_owner"), "tags": a.get("tags", [])}
+            "country": a.get("country"), "as_owner": a.get("as_owner"),
+            "asn": a.get("asn"), "network": a.get("network"), "tags": a.get("tags", [])}
 
 
 # --- File hash --------------------------------------------------------------
@@ -121,10 +141,28 @@ def _hash_lookup(args: dict, ctx: ToolContext) -> dict:
         return {"hash": h, "error": f"vt_status_{code}", **body}
     # Drill into the VT response to get file attributes.
     a = body.get("data", {}).get("attributes", {})
+    # Code-signing details: a file signed by a known publisher is far less likely to be a
+    # dropper, while "unsigned" on a Windows executable is a meaningful red flag.
+    sig = a.get("signature_info") or {}
+    # Sandbox detonation verdicts, collapsed to {sandbox: category} and capped at 3. Having
+    # these inline is why no separate files/{hash}/behaviours call is needed.
+    verdicts = [
+        {"sandbox": name, "category": (v or {}).get("category")}
+        for name, v in list((a.get("sandbox_verdicts") or {}).items())[:3]
+    ]
     # Merge detection stats with file-type metadata and a capped list of known filenames.
     return {"hash": h, "found": True, **_stats(a),
             "type_description": a.get("type_description"),
             "meaningful_name": a.get("meaningful_name"),
+            # The malware FAMILY label (e.g. "ransomware.wannacry") — the single most
+            # decision-relevant VT field, previously fetched and discarded.
+            "threat_label": (a.get("popular_threat_classification") or {})
+                            .get("suggested_threat_label"),
+            "signed_by": sig.get("product") or sig.get("signers"),
+            "signature_verified": sig.get("verified"),
+            # First time VT ever saw this sample — a brand-new hash is a strong novelty signal.
+            "first_seen": _epoch_date(a.get("first_submission_date")),
+            "sandbox_verdicts": verdicts,
             "names": (a.get("names") or [])[:5]}
 
 
@@ -145,12 +183,41 @@ def _domain_lookup(args: dict, ctx: ToolContext) -> dict:
         return {"domain": d, "error": f"vt_status_{code}", **body}
     # Drill into the VT response to get domain attributes.
     a = body.get("data", {}).get("attributes", {})
-    # Merge detection stats with a capped list of category labels (values only, not the keying engine).
+    # Merge detection stats with a capped list of category labels (values only, not the keying
+    # engine). registered/registrar are the newly-registered-domain heuristic: a domain created
+    # days before an alert is a classic command-and-control (C2) tell.
     return {"domain": d, "found": True, **_stats(a),
+            "registered": _epoch_date(a.get("creation_date")),
+            "registrar": a.get("registrar"),
             "categories": list((a.get("categories") or {}).values())[:5]}
 
 
-# --- Register the three tools -------------------------------------------------
+# --- URL --------------------------------------------------------------------
+def _url_lookup(args: dict, ctx: ToolContext) -> dict:
+    """Reputation of a FULL url. VT identifies a URL resource by its URL-safe base64 id with
+    the '=' padding stripped, so we compute that here and the model just passes a plain URL."""
+    u = (args.get("url") or "").strip()
+    if not _URL_RE.match(u):
+        # Validate before spending a VT quota unit — the public tier is rate-limited.
+        return {"url": u, "error": "invalid url (expect a full http:// or https:// URL)"}
+    # VT's documented URL identifier: urlsafe base64 of the URL, without '=' padding.
+    url_id = base64.urlsafe_b64encode(u.encode()).decode().rstrip("=")
+    code, body = _vt_get(f"urls/{url_id}")
+    if code == 404:
+        # VT has no record of this URL (it has never been submitted for scanning).
+        return {"url": u, "found": False}
+    if code != 200:
+        # Any other failure status: surface it with whatever body came back.
+        return {"url": u, "error": f"vt_status_{code}", **body}
+    a = body.get("data", {}).get("attributes", {})
+    # Detection stats plus the few URL-specific fields worth the tokens.
+    return {"url": u, "found": True, **_stats(a),
+            "title": a.get("title"),
+            "final_url": a.get("last_final_url"),
+            "categories": list((a.get("categories") or {}).values())[:5]}
+
+
+# --- Register the tools ---------------------------------------------------------
 # register() adds a Tool to the shared TOOL_REGISTRY that the automated agent reads.
 # Each Tool bundles: a name the model uses to call it, a description that tells the
 # model WHEN to use it, a JSON-schema `parameters` block describing the arguments,
@@ -160,7 +227,8 @@ def _domain_lookup(args: dict, ctx: ToolContext) -> dict:
 register(Tool(
     name="virustotal_ip_lookup",
     description="Reputation of a public IPv4 on VirusTotal. Use for external source/dest IPs "
-                "in network/auth alerts. Private/local IPs are skipped automatically.",
+                "in network/auth alerts. Private/local IPs are skipped automatically. Also "
+                "returns country, owning ASN and network range (who routes this address).",
     parameters={"ip": {"type": "string", "description": "Public IPv4 to look up"}},
     required=["ip"], handler=_ip_lookup,
 ))
@@ -168,15 +236,30 @@ register(Tool(
 register(Tool(
     name="lookup_file_hash",
     description="Reputation of a file hash (md5/sha1/sha256) on VirusTotal. Use for malware / "
-                "file-integrity / process alerts that carry a hash.",
+                "file-integrity / process alerts that carry a hash. Also returns the malware "
+                "FAMILY (threat_label), code-signing status (signed_by / signature_verified), "
+                "first_seen date (a sample first seen days ago is far more suspicious than one "
+                "with years of history), and sandbox detonation verdicts.",
     parameters={"hash": {"type": "string", "description": "md5/sha1/sha256 hex"}},
     required=["hash"], handler=_hash_lookup,
 ))
 # Register the domain-reputation tool as "lookup_domain".
 register(Tool(
     name="lookup_domain",
-    description="Reputation/categories of a domain on VirusTotal. Use for DNS/proxy/C2 alerts "
-                "that reference a domain.",
+    description="Reputation/categories of a BARE DOMAIN (hostname only) on VirusTotal. Use for "
+                "DNS/proxy/C2 alerts that reference a domain. Also returns the registration date "
+                "and registrar — a domain registered days before the alert is a classic "
+                "command-and-control tell. For a full http(s) URL use lookup_url instead.",
     parameters={"domain": {"type": "string", "description": "domain name, e.g. evil.example.com"}},
     required=["domain"], handler=_domain_lookup,
+))
+# Register the URL-reputation tool as "lookup_url".
+register(Tool(
+    name="lookup_url",
+    description="Reputation of a FULL URL (including path) on VirusTotal. Use ONLY for "
+                "web / proxy / web-shell / SQL-injection alerts that carry a complete http(s) "
+                "URL. For a bare hostname with no path, use lookup_domain instead.",
+    parameters={"url": {"type": "string",
+                        "description": "full URL including http:// or https://"}},
+    required=["url"], handler=_url_lookup,
 ))

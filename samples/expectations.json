@@ -1,0 +1,84 @@
+{
+  "_comment": [
+    "Labeled ground truth for the evaluation harness (python -m app.eval).",
+    "Bands are deliberately anchored to the TRIAGE THRESHOLDS in config.py, not to exact",
+    "scores: triage_medium_threshold=40 (below this an alert auto-closes and no human ever",
+    "sees it) and triage_high_threshold=80 (at or above this it is flagged/escalated).",
+    "A band violation therefore means a real OPERATIONAL difference - an attack that would",
+    "be silently auto-closed, or benign noise that would page an analyst - rather than",
+    "harmless score jitter from the model's temperature.",
+    "Keep bands wide enough to tolerate that jitter and narrow enough to catch regressions."
+  ],
+  "cases": [
+    {
+      "sample": "attacks/benign_cron.json",
+      "min_score": 0, "max_score": 39,
+      "why": "Routine scheduled backup job. MUST auto-close (<40) - paging on cron is pure noise."
+    },
+    {
+      "sample": "attacks/benign_low.json",
+      "min_score": 0, "max_score": 39,
+      "why": "Successful key-based login by sysadmin from a known internal admin workstation. MUST auto-close. (Was the flagship false positive: the agent inherited critical(95) from its OWN unverified prior verdict. Fixed by discounting unverified memories and forcing a tool call before submit - now scores ~15.)"
+    },
+    {
+      "sample": "attacks/benign_update.json",
+      "min_score": 0, "max_score": 39,
+      "why": "Normal apt package update. MUST auto-close."
+    },
+    {
+      "sample": "attacks/port_scan.json",
+      "min_score": 20, "max_score": 79,
+      "why": "Recon only, no compromise. Should be visible but NOT escalated as critical."
+    },
+    {
+      "sample": "attacks/corr_1_recon.json",
+      "min_score": 40, "max_score": 89,
+      "why": "Brute-force attempts, not yet successful. Should be queued for a human."
+    },
+    {
+      "sample": "attacks/corr_2_breach.json",
+      "min_score": 70, "max_score": 100,
+      "why": "Successful login after repeated failures = actual compromise. Should escalate."
+    },
+    {
+      "sample": "attacks/sql_injection.json",
+      "min_score": 60, "max_score": 100,
+      "why": "Active SQLi with UNION SELECT against a live app."
+    },
+    {
+      "sample": "attacks/web_shell_upload.json",
+      "min_score": 75, "max_score": 100,
+      "why": "Web shell on disk = remote code execution foothold. Should escalate."
+    },
+    {
+      "sample": "attacks/privilege_escalation.json",
+      "min_score": 70, "max_score": 100,
+      "why": "www-data escalating to root is a hard compromise signal."
+    },
+    {
+      "sample": "attacks/data_exfiltration.json",
+      "min_score": 70, "max_score": 100,
+      "why": "4.5 GiB outbound to an untrusted host vs a 12 MiB/day baseline."
+    },
+    {
+      "sample": "attacks/ransomware.json",
+      "min_score": 85, "max_score": 100,
+      "why": "Mass file rename + ransom note. The single most severe scenario - must escalate."
+    },
+    {
+      "sample": "wazuh_ssh_bruteforce.json",
+      "min_score": 40, "max_score": 100,
+      "why": "Repeated SSH auth failures from 185.220.101.1. BAND WIDENED 89->100 ON PURPOSE: an ANALYST-CONFIRMED memory (id 25, human_action=confirm, score 95) records a SUCCESSFUL login from this same IP, so escalating is correct here - the agent is obeying the 'analyst verdicts are authoritative' rule, not over-reacting. If that confirmed record is ever removed, tighten this back to 40-89."
+    },
+    {
+      "sample": "wazuh_ssh_returning_attacker.json",
+      "min_score": 55, "max_score": 100,
+      "why": "Auth SUCCESS from an IP with prior failures - the memory layer should raise this."
+    },
+    {
+      "sample": "wazuh_malware_file.json",
+      "min_score": 0, "max_score": 49,
+      "why": "EICAR is a harmless standard AV TEST file that does nothing. The correct expert verdict is LOW. Band was 55-100 and has been tightened DOWNWARD, honouring the prediction recorded in it beforehand: it used to score 90+ by trusting VirusTotal's 'malicious' count blindly, and under stage-anchored scoring the agent now reasons that the file cannot cause harm. Escalating on EICAR is a false positive, so this case now tests exactly that."
+    }
+  ]
+}
