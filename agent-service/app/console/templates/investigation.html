@@ -138,6 +138,14 @@
   <p><strong>Summary.</strong> {{ inv.analysis.summary or '—' }}</p>
   <!-- Agent's recommended next action -->
   <p><strong>Recommended action.</strong> {{ inv.analysis.recommended_action or '—' }}</p>
+  <!-- The facts the agent established during THIS investigation. Guarded by `if` because
+       records written before the evidence field existed simply won't carry it. -->
+  {% if inv.analysis.evidence %}
+  <p><strong>What we found.</strong> <span class="muted note">(established in this investigation)</span></p>
+  <ul>
+    {% for e in inv.analysis.evidence %}<li>{{ e }}</li>{% endfor %}
+  </ul>
+  {% endif %}
   <!-- Only show MITRE ATT&CK mapping if the agent identified any techniques -->
   {% if inv.analysis.mitre %}
   <p><strong>MITRE.</strong>
@@ -225,6 +233,8 @@
       <span class="muted">iter {{ step.iteration }}</span>
       <!-- Error badge if this specific step failed -->
       {% if step.error %}<span class="sev sev-high">error</span>{% endif %}
+      <!-- Marks a call the agent repeated: answered from cache, the tool was not re-run -->
+      {% if step.duplicate %}<span class="tag tag-mute" title="exact repeat of an earlier call; answered from cache, not re-run">repeat (cached)</span>{% endif %}
       <!-- The agent's stated reasoning for making this call, if recorded -->
       {% if step.reason %}<div class="reason">{{ step.reason }}</div>{% endif %}
       <!-- Pretty-printed JSON of the call arguments, if any were passed -->

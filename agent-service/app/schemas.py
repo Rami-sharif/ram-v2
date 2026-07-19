@@ -134,6 +134,12 @@ class AnalysisResult(BaseModel):
     summary: str
     # Free-text recommended remediation/next action.
     recommended_action: str
+    # The concrete findings the agent established during THIS investigation, one per entry.
+    # `submit_analysis` marks this REQUIRED for the model, but it defaults to [] here on
+    # purpose: the rule-based `_fallback_analysis` never runs an investigation and so has no
+    # findings to cite, and analyses recorded before this field existed must still validate
+    # when they are read back out of the database.
+    evidence: list[str] = Field(default_factory=list)
 
 
 # Request body for POST /memory/search. FastAPI uses this model to parse and validate
