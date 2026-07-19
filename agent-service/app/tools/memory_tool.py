@@ -10,6 +10,8 @@ brute force from tor" can surface a past alert worded differently but about the 
 thing. It's READ-ONLY: it only recalls history, it never writes."""
 # Standard library logging, used to record memory-search failures without crashing the tool.
 import logging
+# Timezone-aware "now", used as the single reference instant for the age-decay re-ranking.
+from datetime import datetime, timezone
 
 # The memory module owns the vector-search implementation over past alerts+analyses.
 from .. import memory
@@ -38,20 +40,40 @@ def _search_memory(args: dict, ctx: ToolContext) -> dict:
         # Any failure (DB down, embedding error, etc.) must not crash the agent loop.
         logger.exception("search_memory failed")
         return {"error": f"memory search failed: {exc}"}
+    # Re-rank the raw cosine matches the same way the alert pipeline ranks memories, so this
+    # tool honours analyst ground truth instead of treating every past alert as equally
+    # trustworthy. feedback_weight boosts memories an analyst confirmed (and boosts a CORRECTED
+    # one most, since that is verified ground truth fixing a past mistake); the decay factor
+    # sinks stale memories beneath equally-relevant recent ones. Same multiplicative composition
+    # used by memory._score_candidate, minus the exact-IOC tier (which needs the live alert).
+    now = datetime.now(timezone.utc)  # one reference instant so all rows age identically
+    for r in rows:
+        r["_rank"] = ((r.get("similarity") or 0.0)
+                      * memory.feedback_weight(r.get("analysis"))
+                      * memory._decay_factor(r, now))
+    rows.sort(key=lambda r: r["_rank"], reverse=True)  # best composite score first
+
     # Build a compact, model-friendly view of each matched memory row.
     items = []
     for r in rows:
         # Prior stored analysis dict, defaulting to {} if absent.
         a = r.get("analysis") or {}
         items.append({
-            # Row identifier and best-available timestamp (alert time, else creation time).
-            "id": r["id"], "when": str(r.get("alert_timestamp") or r.get("created_at")),
+            # Best-available timestamp (alert time, else creation time). NOTE: the row id is
+            # deliberately NOT returned — there is no tool to dereference it, so exposing it
+            # would only invite the model to invent follow-up calls it cannot make.
+            "when": str(r.get("alert_timestamp") or r.get("created_at")),
             # Similarity score: how close this past alert is to the query (higher = more
             # alike). Rounded to 3 decimals for readability; None if the store omitted it.
             "similarity": round(r["similarity"], 3) if r.get("similarity") is not None else None,
             "alert_text": r["alert_text"],
             # Pull out the prior verdict fields the analyst/agent would care about.
             "severity": a.get("severity_label"), "attack_type": a.get("attack_type"),
+            # Human ground truth: whether an analyst reviewed this memory and, if so, whether
+            # they confirmed the verdict or overrode it. The system prompt tells the agent to
+            # treat these as authoritative, so the flags must actually reach it.
+            "analyst_reviewed": bool(a.get("human_reviewed")),
+            "analyst_action": a.get("human_action"),
         })
     # Return both a count and the list, so the model can quickly gauge relevance/coverage.
     return {"count": len(items), "matches": items}
@@ -61,8 +83,13 @@ def _search_memory(args: dict, ctx: ToolContext) -> dict:
 register(Tool(
     name="search_memory",
     # Explains to the model when to reach for this tool: comparing against company history.
-    description="Semantic search over stored past alerts+analyses (this company's history). "
-                "Use to check whether similar activity has been seen and how it was judged before.",
+    description="Semantic search over stored past alerts+analyses (this company's history) for "
+                "SIMILAR SITUATIONS — matches by meaning, so it finds past alerts worded "
+                "differently about the same kind of activity. Results are ranked by similarity, "
+                "how recent they are, and whether an analyst verified them; each match reports "
+                "analyst_reviewed / analyst_action, and a human-reviewed match is authoritative. "
+                "To instead check a SPECIFIC indicator (this exact IP or file hash) against past "
+                "cases, use search_past_investigations.",
     parameters={
         # Free-text description of what to search for.
         "query": {"type": "string", "description": "what to look for, e.g. 'ssh brute force from tor'"},

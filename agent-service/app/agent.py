@@ -49,12 +49,57 @@ SYSTEM_INSTRUCTION = (
     "suspicious leads. Be selective — do NOT call tools that are irrelevant (e.g. do not "
     "look up file hashes for a pure login/brute-force alert, and do not query user-login "
     "activity for a malware/file alert). Each tool call must include a short 'reason'. "
-    "When you have enough evidence, call submit_analysis exactly once with your verdict. "
-    "Let the Wazuh rule level and any malicious enrichment drive severity. "
+    "ESTABLISH THE FACTS OF THIS ALERT FIRST, USING YOUR TOOLS, AND ONLY THEN WEIGH HISTORY. "
+    "The 'Prior related alerts' block in your prompt is CONTEXT, not evidence — it is mostly "
+    "what this system itself concluded about OTHER alerts, and it must never stand in for "
+    "investigating this one. You must run at least one investigation tool and ground your "
+    "verdict in what it returns NOW. Once you hold current facts, search_past_investigations "
+    "tells you whether this exact IP or hash already has a recorded verdict, search_memory "
+    "tells you whether a similar situation was seen before, and get_alert_statistics tells you "
+    "whether this activity is rare or routine on this host (it returns counts, not raw alerts). "
+    "A prior case that an ANALYST reviewed is authoritative — align your verdict with it and "
+    "say so. "
+    "BUDGET: you get at most 8 turns and must reserve one for submit_analysis. Prefer 3-5 "
+    "well-chosen tool calls over exhaustive enumeration, and never call two tools that answer "
+    "the same question. "
+    "When you have enough evidence, call submit_analysis exactly once with your verdict, "
+    "listing in its 'evidence' field the concrete facts YOU established this run. "
+    "SEVERITY: use the whole 0-100 range exactly as the submit_analysis schema defines it, and "
+    "score on how far the attack actually GOT. The Wazuh rule level tells you how noisy a rule "
+    "is, NOT how damaging this event is — almost every rule worth alerting on sits at level "
+    "10-12, so it cannot separate a port scan from ransomware. Never score 80 or above unless "
+    "you can name concrete evidence that the attack SUCCEEDED. A malicious attempt that failed "
+    "or was blocked belongs in 60-79, and routine activity belongs below 40 no matter how high "
+    "the rule level is. "
+    "ASK WHETHER IT IS AN ATTACK AT ALL BEFORE SCORING IT AS ONE. A Wazuh rule named 'brute "
+    "force' describes the PATTERN it matched — repeated failures — not proof that anyone hostile "
+    "was involved. A legitimate user mistyping a password produces the very same rule. Before "
+    "treating repeated failures as an attack, check whether an innocent explanation fits: a "
+    "PRIVATE/internal source IP (10.x.x.x, 192.168.x.x, 172.16-31.x.x), an account that already "
+    "appears regularly in this host's history, and no successful login together point to someone "
+    "locking themselves out, not an intruder — score that below 40. Treat an external or "
+    "reputation-flagged source IP, an account that does not belong on this host, or any sign of "
+    "success as evidence pointing the other way. "
+    "FAMILIARITY IS REASSURING, NOT SUSPICIOUS. If get_alert_statistics shows a source IP or user "
+    "appears often on this host, that is evidence it BELONGS there. Do not cite a high prior count "
+    "as grounds for suspicion. "
+    "RARITY IS NOT MALICE. If get_alert_statistics returns few or zero prior hits, that means we "
+    "hold little history — a quiet host, or a recently deployed system — NOT that the event is "
+    "anomalous. Never raise severity merely because something has not been seen before. A normal "
+    "action by a legitimate account stays low even when it is the first one on record. "
+    "COUNTING UNVERIFIED PRIORS DOES NOT MAKE THEM TRUE, either: five unreviewed cases saying "
+    "'critical' are one unreviewed guess repeated five times, because this system wrote them all "
+    "itself. Only a human review turns a prior verdict into ground truth. "
     "If the prior related alerts include a human decision (marked ANALYST-CORRECTED or "
     "ANALYST-CONFIRMED), treat that analyst verdict as authoritative ground truth for "
     "closely similar alerts: align your severity_label, severity_score and attack_type "
     "with it unless THIS alert clearly differs, and say so in your summary. "
+    "A prior alert marked UNVERIFIED is NOT ground truth — it is this system's own earlier "
+    "guess, which may have been wrong or may have been based on circumstances that no longer "
+    "apply. Agreeing with it is NOT corroboration. Judge THIS alert on its own evidence: the "
+    "rule level, what the log actually shows, and what your tools return now. In particular, "
+    "do not inherit a high severity from an UNVERIFIED prior verdict when the current alert "
+    "is routine on its own merits. "
     "Write the summary and recommended_action in very simple, plain English so a "
     "non-expert can follow. Use short sentences and everyday words. Keep only the "
     "well-known security terms (e.g. severity, MITRE, brute force, ransomware, IP, "
@@ -164,18 +209,33 @@ def run_agent(
         types.Content(role="user",
                       parts=[types.Part(text=_build_prompt(alert, public_ips, memory_context))])
     ]
-    all_allowed = tools.allowed_names() + [tools.SUBMIT_ANALYSIS]  # read-only tools plus the submit action
+    investigative = tools.allowed_names()  # the read-only tools, excluding submit
     evidence: dict[str, Any] = {}  # accumulated tool results keyed by "iteration:tool_name"
     trace: list[dict[str, Any]] = []  # human/audit-readable record of each tool call made
+    # Cache of (tool, args) -> result for THIS run, so an exact repeat is answered from
+    # cache instead of re-dispatched, and a repeat loop can be detected and cut short.
+    seen_calls: dict[str, dict[str, Any]] = {}
+    duplicate_count = 0  # running total of exact-repeat calls (see agent_max_duplicate_calls)
 
     # Each pass of this loop is one "turn": we send the whole conversation so far and get
     # back the model's next move. `agent_max_iterations` caps how many turns we allow so
     # the loop always terminates. `contents` grows every turn — the model has no memory
     # between API calls, so we must resend the full history each time for it to "remember".
     for iteration in range(1, settings.agent_max_iterations + 1):
+        # Withhold submit_analysis until the agent has actually TRIED a tool, so it cannot
+        # close the case straight off the prompt. That matters because prior related alerts
+        # are injected into the prompt before any tool runs: with submit available on turn 1
+        # the model could (and did) copy a verdict from a similar past alert without
+        # establishing anything itself — and since its own unreviewed verdicts are what it
+        # retrieves, that loop lets one early mistake keep confirming itself.
+        #
+        # Keyed on `trace`, which records ATTEMPTED calls including failed ones. A tool that
+        # errors still unlocks submit: the goal is to force an investigation, not to trap the
+        # agent in a loop when an upstream service is down.
+        allowed = investigative + ([tools.SUBMIT_ANALYSIS] if trace else [])
         # Ask the model for its next action (a tool call), constrained to the allowed set
         response = client.models.generate_content(
-            model=settings.gemini_model, contents=contents, config=_config(all_allowed)
+            model=settings.gemini_model, contents=contents, config=_config(allowed)
         )
         fc = _first_function_call(response)  # extract the function call the model chose
         if fc is None:
@@ -198,16 +258,48 @@ def run_agent(
         # ---- a read-only tool call ----
         args = dict(fc.args)  # copy the model-supplied arguments
         reason = args.get("reason", "")  # the model's stated justification for this call
+        call_args = {k: v for k, v in args.items() if k != "reason"}  # args that define the call
+        # Canonical identity of this call, ignoring `reason` (the model often reworks the
+        # wording while repeating the identical query). sort_keys so arg order never matters.
+        call_key = fc.name + "|" + json.dumps(call_args, sort_keys=True, default=str)
+
+        if call_key in seen_calls:
+            # Exact repeat: answer from cache instead of re-running the tool, and tell the
+            # model plainly that it already has this so it stops circling. The model turn
+            # that produced this repeat is already spent; what we prevent is the re-dispatch
+            # and the NEXT repeat.
+            duplicate_count += 1
+            cached = seen_calls[call_key]
+            logger.warning("AGENT duplicate tool_call alert=%s iter=%s tool=%s args=%s "
+                           "(repeat #%d) — returning cached result, not re-running",
+                           alert.id, iteration, fc.name, call_args, duplicate_count)
+            trace.append({"iteration": iteration, "tool": fc.name, "args": call_args,
+                          "reason": reason, "error": cached.get("error"), "duplicate": True})
+            steer = (f"You already called {fc.name} with these exact arguments earlier in "
+                     f"this investigation. The result below is unchanged. Do NOT call it "
+                     f"again — use a DIFFERENT tool or call submit_analysis now.")
+            contents.append(response.candidates[0].content)  # the model's (repeat) turn
+            contents.append(types.Content(role="user", parts=[
+                types.Part.from_function_response(
+                    name=fc.name, response={"result": cached, "already_called": steer})
+            ]))
+            if duplicate_count >= settings.agent_max_duplicate_calls:
+                # It ignored the steer and kept repeating — stop looping and force a verdict
+                # from the evidence already gathered rather than burn the rest of the budget.
+                logger.warning("AGENT repeated tool calls hit limit (%d); forcing submit "
+                               "(alert=%s)", duplicate_count, alert.id)
+                break
+            continue
+
         # Log the tool call (excluding the reason from the args dict since it's logged separately)
         logger.info("AGENT tool_call alert=%s iter=%s tool=%s args=%s reason=%r",
-                    alert.id, iteration, fc.name,
-                    {k: v for k, v in args.items() if k != "reason"}, reason)
+                    alert.id, iteration, fc.name, call_args, reason)
         # `dispatch` looks up the named tool in the registry and runs it. This is OUR code
         # executing the function the model requested — the model itself never runs anything.
         result = tools.dispatch(fc.name, args, ctx)  # actually execute the read-only tool
+        seen_calls[call_key] = result  # cache so an exact repeat is short-circuited above
         # Record this step in the trace for later display/audit
-        trace.append({"iteration": iteration, "tool": fc.name,
-                      "args": {k: v for k, v in args.items() if k != "reason"},
+        trace.append({"iteration": iteration, "tool": fc.name, "args": call_args,
                       "reason": reason, "error": result.get("error")})
         evidence[f"{iteration}:{fc.name}"] = result  # store the raw result for building the case description later
         # We now grow the conversation with two things so the next turn has full context:

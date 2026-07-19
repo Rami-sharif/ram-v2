@@ -286,9 +286,12 @@ def feedback_weight(analysis: Optional[dict[str, Any]]) -> float:
       - auto-closed / never reviewed -> baseline 1.0
     The confirm/override signal is written by record_human_verdict onto the analysis JSON."""
     a = analysis or {}  # tolerate a missing/None analysis blob
-    if not a.get("human_reviewed"):
-        return 1.0  # auto-closed / unverified — no human signal, baseline weight
     s = get_settings()  # tunable multipliers live in settings
+    if not a.get("human_reviewed"):
+        # Auto-closed / never reviewed. Deliberately discounted BELOW 1.0: this is the
+        # system's own prior guess, so treating it as neutral evidence is what lets a single
+        # wrong verdict reinforce itself on every later retrieval.
+        return s.memory_weight_unverified
     if a.get("human_action") == "override":
         return s.memory_weight_overridden  # analyst corrected a wrong verdict — highest trust
     return s.memory_weight_confirmed  # analyst confirmed the verdict as correct
@@ -499,6 +502,13 @@ def format_memories_for_prompt(memories: list[dict[str, Any]]) -> str:
             else:
                 # Analyst confirmed the agent's original verdict as-is
                 line += f"  ✓ ANALYST-CONFIRMED [by {a.get('reviewed_by')}]"
+        else:
+            # NOT reviewed by anyone. This is the agent's OWN earlier guess, and without a
+            # marker it reads exactly like established fact — which is how a single wrong
+            # verdict becomes self-confirming: the agent retrieves it, agrees with itself,
+            # and writes the same verdict back. Label it explicitly so the model can tell
+            # corroborating evidence apart from an echo of its own past output.
+            line += "  ⚠ UNVERIFIED (this system's own earlier guess — no human checked it)"
         lines.append(line)
     return "\n".join(lines)
 
