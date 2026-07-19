@@ -8,9 +8,12 @@ JSON). This module wires together every route the service exposes.
 """
 # Standard logging module, used to set up the app-level logger.
 import logging
+# Used to detach each investigation from the request that delivered it, so the work
+# survives the caller disconnecting.
+import asyncio
 # `Any` means "a value of any type". Used below for JSON-ish dicts whose exact
 # shape we don't pin down (JSON can hold arbitrary nested data).
-from typing import Any
+from typing import Any, Optional
 
 # FastAPI: the application class. Request: an object representing one incoming
 # HTTP request (headers, body, etc.), used in the webhook handler to read the body.
@@ -27,6 +30,10 @@ from pathlib import Path
 # a signed "session" cookie so the analyst console can remember who is logged in.
 # (Starlette is the lower-level toolkit FastAPI is built on top of.)
 from starlette.middleware.sessions import SessionMiddleware
+# Runs a blocking function in a worker thread and awaits it, so slow synchronous work
+# (the investigation pipeline) never occupies the event loop the server needs to stay
+# responsive to other requests.
+from starlette.concurrency import run_in_threadpool
 
 # In-process operational counters module (surfaced on /health).
 from . import metrics
@@ -129,15 +136,70 @@ def health() -> dict[str, Any]:
     }
 
 
+# Caps how many investigations run at once (see webhook_max_concurrent_investigations).
+# Created lazily on first use because a Semaphore should be built once the event loop
+# exists, and `app` is imported before the server starts running.
+_investigation_slots: Optional[asyncio.Semaphore] = None
+
+# Strong references to in-flight background tasks. asyncio only holds a WEAK reference to
+# a task, so a task nobody keeps can be garbage-collected mid-run and simply vanish —
+# which is exactly the silent alert loss this whole change exists to stop. Each task
+# removes itself on completion.
+_background_investigations: set[asyncio.Task] = set()
+
+
+def _slots() -> asyncio.Semaphore:
+    """The concurrency limiter, created on first use inside the running event loop."""
+    global _investigation_slots
+    if _investigation_slots is None:
+        _investigation_slots = asyncio.Semaphore(
+            get_settings().webhook_max_concurrent_investigations)
+    return _investigation_slots
+
+
+async def _investigate_in_background(payload: dict, alert_id: Any) -> None:
+    """Run one investigation detached from the HTTP request that delivered it.
+
+    Nothing here can report failure to a caller — the caller was answered long ago — so
+    every outcome must end up in the log instead."""
+    async with _slots():  # wait for a free slot rather than piling onto a throttled API
+        try:
+            result = await run_in_threadpool(process_alert, payload)
+            logger.info("Background investigation done alert=%s severity=%s/%s triage=%s",
+                        alert_id, result.analysis.severity_label,
+                        result.analysis.severity_score,
+                        result.triage.action if result.triage else "-")
+        except AgentError as exc:
+            logger.error("Background investigation failed (agent) alert=%s: %s", alert_id, exc)
+        except Exception:  # noqa: BLE001 - a detached task must never die silently
+            logger.exception("Background investigation failed alert=%s", alert_id)
+
+
 # POST /webhook/wazuh — a "webhook" is a URL that another system calls to push data
 # to us. Wazuh (the SIEM/monitoring tool) POSTs one JSON alert here every time a rule
 # fires; this endpoint is the front door of the whole triage pipeline.
+#
+# It ACKNOWLEDGES the alert and investigates afterwards, rather than holding the
+# connection open for the whole investigation. That ordering is the fix for a measured
+# data-loss bug: an investigation used to run inside the request, so whenever the caller
+# gave up first the work was abandoned and the alert left NO record anywhere. It was
+# observed with Wazuh's 20s integration timeout and again, after that was raised to 180s,
+# on a level-14 ransomware alert. Raising a timeout only moves the threshold; the real
+# defect is tying an open-ended investigation to a client's patience.
+#
+# The bias made it worse than a random loss: slow investigations are the complicated ones,
+# and complicated correlates with severe. The failure mode preferentially ate the alerts
+# that mattered most.
+#
+# `?wait=1` keeps the old synchronous behaviour and returns the full analysis. That is for
+# humans testing by hand and for the sample injectors, which want the verdict in the
+# response. Wazuh itself never sets it.
 @app.post("/webhook/wazuh")
 # `async def` marks this as an asynchronous function. We need `await` to read the
 # request body without blocking the server, so the function must be async. `await`
 # means "pause here until this finishes, letting the server handle other requests
 # meanwhile." The pipeline it calls afterwards is ordinary (synchronous) code.
-async def wazuh_webhook(request: Request) -> JSONResponse:
+async def wazuh_webhook(request: Request, wait: bool = False) -> JSONResponse:
     try:
         # Read and parse the request body as JSON. `await` because reading the network
         # stream may take time; this yields control until the body has arrived.
@@ -147,10 +209,40 @@ async def wazuh_webhook(request: Request) -> JSONResponse:
         logger.warning("Received webhook with invalid JSON body")
         return JSONResponse(status_code=400, content={"status": "error", "detail": "invalid JSON"})
 
+    alert_id = payload.get("id") if isinstance(payload, dict) else None
+
+    if not wait:
+        # Normal path: acknowledge now, investigate after. create_task detaches the work
+        # from this request, so the investigation finishes even if the caller hangs up the
+        # instant we reply.
+        task = asyncio.create_task(_investigate_in_background(payload, alert_id))
+        _background_investigations.add(task)  # keep a strong ref; see the set's comment
+        task.add_done_callback(_background_investigations.discard)
+        # "accepted" counts tasks created, which is NOT the number running: only
+        # webhook_max_concurrent_investigations run at a time and the rest wait on the
+        # semaphore. Naming it precisely matters when reading these logs during a burst.
+        logger.info("Accepted alert=%s for background investigation "
+                    "(accepted and not yet finished: %d, max running at once: %d)",
+                    alert_id, len(_background_investigations),
+                    get_settings().webhook_max_concurrent_investigations)
+        # 202 Accepted, not 200 OK: the work is queued, not finished. The body carries no
+        # verdict because none exists yet — read it from the console or /ops once done.
+        return JSONResponse(status_code=202,
+                            content={"status": "accepted", "alert_id": alert_id,
+                                     "detail": "investigation started"})
+
     try:
-        # Hand the parsed alert to the real pipeline (enrichment, LLM analysis, triage,
-        # case creation, memory). This returns a Pydantic response model.
-        result = process_alert(payload)
+        # `?wait=1` only: run the pipeline (enrichment, LLM analysis, triage, case
+        # creation, memory) inline and return the full verdict.
+        #
+        # run_in_threadpool, NOT a direct call: process_alert is ordinary blocking code
+        # that runs several LLM turns and can take minutes. This route is `async def`, so
+        # it executes ON the event loop, and calling a blocking function there freezes the
+        # WHOLE service — not just this request. That was observed: while one investigation
+        # ran, /health stopped answering entirely and Docker marked the container unhealthy,
+        # so the console and every other alert were stalled behind a single slow alert.
+        # Handing it to a worker thread keeps the loop free to serve everything else.
+        result = await run_in_threadpool(process_alert, payload)
         # Happy path: reply 200 (OK). model_dump() converts the Pydantic model to a
         # plain dict that JSONResponse can serialize to JSON.
         return JSONResponse(status_code=200, content=result.model_dump())

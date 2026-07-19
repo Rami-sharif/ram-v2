@@ -53,6 +53,15 @@ class Settings(BaseSettings):
     # --- Agent loop ---
     agent_max_iterations: int = 8  # bounded tool choice has more tools now
 
+    # How many EXACT-repeat tool calls to tolerate before forcing the agent to conclude.
+    # The model was measured re-calling the same tool with identical arguments (e.g.
+    # get_alert_statistics group_by=data.dstip twice in a row), which wastes a model
+    # round-trip each time and, once the API starts throttling, stretches a single
+    # investigation past its iteration cap without ever producing a verdict. A repeat is
+    # answered from cache with a "you already ran this" steer; after this many repeats the
+    # loop stops and forces submit_analysis. 2 = nudge once, then cut it off.
+    agent_max_duplicate_calls: int = 2
+
     # --- Wazuh Indexer (read-only investigation queries) ---
     # Base URL of the Wazuh Indexer (OpenSearch) used for read-only investigation queries.
     wazuh_indexer_url: str = "https://wazuh.indexer:9200"
@@ -105,6 +114,12 @@ class Settings(BaseSettings):
     # Overridden ranks highest: it's verified ground truth that corrected a past mistake.
     memory_weight_confirmed: float = 1.2   # analyst confirmed the agent's verdict as correct
     memory_weight_overridden: float = 1.3  # analyst corrected a wrong verdict (highest trust)
+    # An unreviewed memory is the system's OWN earlier verdict, not independent evidence.
+    # Discounting it below 1.0 keeps human-verified history dominant and damps the
+    # self-confirmation loop where one wrong verdict is retrieved, agreed with, and written
+    # back forever. Purely relative: when every candidate is unreviewed they all get the same
+    # factor, so ordering among them is unchanged — it only matters when mixing with verified.
+    memory_weight_unverified: float = 0.85
     # Age decay: final_score also multiplies by exp(-age_in_days / memory_decay_days), so
     # stale cases sink beneath recent ones of similar relevance. This is the e-folding time
     # constant (NOT a strict half-life): a memory this many days old keeps ~1/e (0.37) of its
@@ -164,6 +179,13 @@ class Settings(BaseSettings):
     # catches genuine bursts, so a repeat later still earns a fresh investigation.
     dedup_gate_enabled: bool = True
     dedup_gate_window_minutes: float = 5.0
+
+    # How many investigations may run at once when the webhook processes alerts in the
+    # background. Deliberately small: the limit that bites first is not CPU but the model's
+    # requests-per-minute quota. Firing ~50 model calls in three minutes was measured to
+    # trigger throttling, which stretched single iterations from ~1s to ~4 minutes. Alerts
+    # beyond this limit wait their turn rather than piling onto a throttled API.
+    webhook_max_concurrent_investigations: int = 3
 
     # Derived flag (a @property, see postgres_dsn above): TheHive case creation is
     # considered "on" only when an API key has actually been configured.

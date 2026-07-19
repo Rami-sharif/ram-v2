@@ -86,10 +86,19 @@ def main(argv):
         alert.get("id"), rule.get("id"), rule.get("level"), hook_url,
     )
     try:
-        # Forward the alert JSON verbatim (same shape Wazuh produced) to
-        # the agent webhook, with a 20s timeout so a hung endpoint can't
-        # block the integrator daemon indefinitely.
-        resp = requests.post(hook_url, json=alert, timeout=20)
+        # Forward the alert JSON verbatim (same shape Wazuh produced) to the agent webhook.
+        #
+        # 30s covers DELIVERY only. The webhook now replies 202 as soon as it has accepted
+        # the alert and runs the investigation detached from this request, so the reply
+        # arrives in milliseconds no matter how long the agent then thinks.
+        #
+        # It used to answer only after the whole investigation, which meant this timeout
+        # had to outlast the model. It didn't: at 20s an alert was lost outright, and after
+        # being raised to 180s a level-14 ransomware alert was lost the same way. A timeout
+        # can only pick which slow investigations get discarded — hence the change at the
+        # other end. Do not "fix" a future timeout here by raising this number again; if
+        # this request is slow now, delivery itself is broken.
+        resp = requests.post(hook_url, json=alert, timeout=30)
         # Log the HTTP status regardless of outcome for observability.
         log.info("agent responded HTTP %s", resp.status_code)
         if resp.status_code >= 400:
